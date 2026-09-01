@@ -1,0 +1,2 @@
+[console_scripts]
+yolo-preview = crypto_yolo.cli:main
