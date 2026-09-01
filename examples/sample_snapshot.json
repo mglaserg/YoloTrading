@@ -1,0 +1,13 @@
+{
+  "signals": [
+    {"ticker":"BTC","price":60000.0,"momentum":0.30,"trend":0.40,"carry":0.10,"ewvol":0.80},
+    {"ticker":"ETH","price":3000.0,"momentum":0.20,"trend":0.30,"carry":-0.10,"ewvol":0.90},
+    {"ticker":"SOL","price":150.0,"momentum":-0.20,"trend":-0.30,"carry":0.10,"ewvol":1.10},
+    {"ticker":"XRP","price":0.60,"momentum":-0.10,"trend":0.10,"carry":0.20,"ewvol":1.00}
+  ],
+  "positions": [
+    {"ticker":"BTC","quantity":0.10,"price":60000.0},
+    {"ticker":"ETH","quantity":1.00,"price":3000.0},
+    {"ticker":"SOL","quantity":-10.0,"price":150.0}
+  ]
+}

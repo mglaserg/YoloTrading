@@ -1,0 +1,12 @@
+[project]
+name = "crypto-yolo-trading"
+version = "0.2.0"
+description = "Crypto YOLO portfolio construction and dry-run trade planning"
+requires-python = ">=3.11"
+
+[project.scripts]
+yolo-preview = "crypto_yolo.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
