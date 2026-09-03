@@ -1,6 +1,6 @@
 [project]
 name = "crypto-yolo-trading"
-version = "0.3.0"
+version = "0.4.0"
 description = "Crypto YOLO portfolio construction and dry-run trade planning"
 requires-python = ">=3.11"
 

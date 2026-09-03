@@ -78,7 +78,7 @@ class RobotWealthClient:
             raise RuntimeError("RW_API_KEY is required for live Robot Wealth pulls")
         query = urlencode({"api_key": self.api_key})
         url = f"{self.base_url.rstrip('/')}/{endpoint}?{query}"
-        request = Request(url, headers={"Accept": "application/json", "User-Agent": "crypto-yolo/0.3"})
+        request = Request(url, headers={"Accept": "application/json", "User-Agent": "crypto-yolo/0.4"})
         pulled_at = _utcnow()
         status = 0
         raw = ""

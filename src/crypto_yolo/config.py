@@ -23,6 +23,10 @@ def _b(name: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class YoloConfig:
     nominal_usd: float = 50_000.0
+    sizing_mode: str = "fixed"
+    min_nominal_multiplier: float = 0.25
+    max_nominal_multiplier: float = 3.0
+    require_dedicated_subaccount_for_compound: bool = True
     account_collateral_usd: float = 20_000.0
     margin_required: float = 0.10
     momentum_multiplier: float = 1.0
@@ -67,6 +71,10 @@ class YoloConfig:
     def from_env(cls) -> "YoloConfig":
         return cls(
             nominal_usd=_f("YOLO_NOMINAL_USD", 50_000),
+            sizing_mode=os.getenv("YOLO_SIZING_MODE", "fixed"),
+            min_nominal_multiplier=_f("YOLO_MIN_NOMINAL_MULTIPLIER", 0.25),
+            max_nominal_multiplier=_f("YOLO_MAX_NOMINAL_MULTIPLIER", 3.0),
+            require_dedicated_subaccount_for_compound=_b("YOLO_REQUIRE_DEDICATED_SUBACCOUNT_FOR_COMPOUND", True),
             account_collateral_usd=_f("YOLO_ACCOUNT_COLLATERAL_USD", 20_000),
             margin_required=_f("YOLO_MARGIN_REQUIRED", 0.10),
             momentum_multiplier=_f("YOLO_MOMENTUM_MULTIPLIER", 1.0),

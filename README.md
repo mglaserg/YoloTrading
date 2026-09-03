@@ -2,7 +2,7 @@
 
 A Python implementation of the Robot Wealth-style Crypto YOLO strategy: **momentum + trend + carry**, inverse-volatility scaled, buffer-aware, and designed for Hyperliquid execution.
 
-Version 0.3 is the first **live-data dry-run** iteration. It can consume the real Robot Wealth YOLO endpoints, persist every vendor pull locally, reject stale/malformed signals, read Hyperliquid positions/marks/margin state, and calculate the exact dry-run trade plan. It still **cannot submit orders**.
+Version 0.4 adds **cash-flow-adjusted compounding** to the live-data dry-run stack. It can consume the real Robot Wealth YOLO endpoints, persist every vendor pull locally, reject stale/malformed signals, read Hyperliquid positions/marks/margin state, calculate the exact dry-run trade plan, and optionally scale the nominal allocation with unitized YOLO NAV. It still **cannot submit orders**.
 
 ## Production portfolio logic
 
@@ -22,9 +22,63 @@ For each asset:
 
 4. If gross exposure exceeds `100%`, proportionally scale the full portfolio back to `100%` gross.
 
-5. Multiply final weights by `YOLO_NOMINAL_USD` to obtain target dollar notionals.
+5. Multiply final weights by the **effective nominal allocation** to obtain target dollar notionals. In fixed mode this is `YOLO_NOMINAL_USD`; in compound mode it is the base nominal multiplied by cash-flow-adjusted YOLO NAV performance.
 
 No covariance/ERC estimator is in the production path. ERC remains a possible research comparison later.
+
+
+## Compound sizing
+
+YOLO now supports two sizing modes:
+
+- `fixed` — `YOLO_NOMINAL_USD` remains constant.
+- `compound` — `YOLO_NOMINAL_USD` is the **base nominal**, and the live planner scales it by YOLO's unitized NAV performance.
+
+The compounding formula is effectively:
+
+`effective_nominal = base_nominal * NAV_per_unit / initial_NAV_per_unit`
+
+The first compound live-data run initializes `NAV_per_unit = 1.0`. If the dedicated YOLO subaccount subsequently gains 10%, the nominal allocation also rises 10%. If it loses 10%, nominal falls 10%. This changes only the dollar scale; the Robot Wealth factor weights, inverse-vol logic, caps, gross constraint, and buffer are unchanged.
+
+### Deposits and withdrawals do not count as returns
+
+The sizing ledger is **unitized**, similar to a fund NAV. External cash flows change the number of strategy units rather than NAV-per-unit. This prevents a deposit from looking like profit or a withdrawal from looking like a loss.
+
+After a deposit or withdrawal has posted to the YOLO Hyperliquid subaccount, record it immediately:
+
+```powershell
+python -m crypto_yolo.cli --record-flow 10000
+python -m crypto_yolo.cli --record-flow -5000
+```
+
+Positive values are deposits; negative values are withdrawals. The command reads the current Hyperliquid equity and issues/redeems strategy units at the inferred pre-flow NAV-per-unit.
+
+A dedicated YOLO subaccount is required by default in compound mode. This prevents P&L from another strategy in a shared account from changing YOLO's sizing. The guard can be disabled explicitly, but that is not recommended.
+
+### Compounding guardrails
+
+The raw performance multiplier is clipped before it reaches position sizing:
+
+```text
+YOLO_MIN_NOMINAL_MULTIPLIER=0.25
+YOLO_MAX_NOMINAL_MULTIPLIER=3.00
+```
+
+For a $50,000 base nominal, those defaults bound the effective nominal between $12,500 and $150,000 even if the raw unitized NAV multiplier moves outside that range. All normal margin/risk checks still run afterward.
+
+If you intentionally change the base nominal or want to establish a fresh compounding inception point, rebase explicitly:
+
+```powershell
+python -m crypto_yolo.cli --rebase-compounding
+```
+
+You can inspect the current unitized state at any time:
+
+```powershell
+python -m crypto_yolo.cli --sizing-status
+```
+
+Sizing decisions and cash-flow events are persisted in the same local `state/yolo.sqlite` audit database.
 
 ## Robot Wealth live inputs
 
@@ -171,6 +225,10 @@ HL_ACCOUNT_ADDRESS=
 HL_YOLO_SUBACCOUNT_ADDRESS=
 
 YOLO_NOMINAL_USD=50000
+YOLO_SIZING_MODE=compound
+YOLO_MIN_NOMINAL_MULTIPLIER=0.25
+YOLO_MAX_NOMINAL_MULTIPLIER=3.00
+YOLO_REQUIRE_DEDICATED_SUBACCOUNT_FOR_COMPOUND=true
 YOLO_TRADE_BUFFER=0.02
 YOLO_BUFFER_MODE=edge
 YOLO_MAX_ASSET_WEIGHT=0.25
@@ -181,7 +239,7 @@ DRY_RUN=true
 HYPERLIQUID_TESTNET=true
 ```
 
-`YOLO_NOMINAL_USD` is the strategy sizing knob. Exchange collateral is not the same thing as strategy nominal allocation.
+`YOLO_NOMINAL_USD` remains the intuitive strategy sizing knob. In `fixed` mode it is the actual nominal; in `compound` mode it is the inception/base nominal that compounds with unitized YOLO performance. Exchange collateral is not the same thing as strategy nominal allocation.
 
 ## Fixture preview
 
@@ -213,6 +271,8 @@ inverse-vol YOLO targets
         ↓
 Hyperliquid marks + positions + margin state
         ↓
+unitized NAV → effective nominal (compound mode)
+        ↓
 2% trade buffer
         ↓
 exchange-precision trade quantities
@@ -234,7 +294,7 @@ This shows recent endpoint pulls, dates, HTTP codes, and whether they were accep
 
 ## Next milestone
 
-After several clean real-data dry runs:
+After several clean real-data dry runs with the signal archive and sizing ledger:
 
 1. persist the complete decision/trade-plan ledger
 2. add Hyperliquid testnet ALO/post-only execution
