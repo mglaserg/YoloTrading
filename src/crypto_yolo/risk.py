@@ -17,14 +17,24 @@ class RiskSummary:
     reasons: tuple[str, ...]
 
 
-def summarize_post_trade(plan: list[TradePlanRow], config: YoloConfig) -> RiskSummary:
+def summarize_post_trade(
+    plan: list[TradePlanRow],
+    config: YoloConfig,
+    *,
+    account_collateral_usd: float | None = None,
+) -> RiskSummary:
     weights = [r.post_trade_weight for r in plan]
     gross_weight = sum(abs(w) for w in weights)
     net_weight = sum(weights)
     gross_usd = gross_weight * config.nominal_usd
     net_usd = net_weight * config.nominal_usd
     margin = gross_usd * config.margin_required
-    margin_util = margin / config.account_collateral_usd if config.account_collateral_usd else float("inf")
+    collateral = (
+        config.account_collateral_usd
+        if account_collateral_usd is None
+        else account_collateral_usd
+    )
+    margin_util = margin / collateral if collateral else float("inf")
     max_asset = max((abs(w) for w in weights), default=0.0)
 
     reasons: list[str] = []
