@@ -1,306 +1,291 @@
 # Crypto YOLO Trading
 
-A Python implementation of the Robot Wealth-style Crypto YOLO strategy: **momentum + trend + carry**, inverse-volatility scaled, buffer-aware, and designed for Hyperliquid execution.
+Python implementation of the Robot Wealth-style Crypto YOLO portfolio: **Momentum + Trend + Carry**, inverse-volatility scaled with Robot Wealth-supplied `ewvol`, buffer-aware, compounding-capable, and staged for Hyperliquid execution.
 
-Version 0.4 adds **cash-flow-adjusted compounding** to the live-data dry-run stack. It can consume the real Robot Wealth YOLO endpoints, persist every vendor pull locally, reject stale/malformed signals, read Hyperliquid positions/marks/margin state, calculate the exact dry-run trade plan, and optionally scale the nominal allocation with unitized YOLO NAV. It still **cannot submit orders**.
+## v0.5: pre-live
+
+Version 0.5 deliberately stops one line before signed order transmission. It can now run the production decision path using real Robot Wealth and Hyperliquid data, persist the full decision trail, construct the exact ALO/post-only orders it **would** submit, and verify that the system is healthy enough for the final live-execution patch.
+
+There is no private-key handling and no `/exchange` order submission in this version. Setting `YOLO_EXECUTION_MODE=execute` is a hard error.
+
+### Current pipeline
+
+```text
+RW yolo/weights + yolo/volatilities
+        ↓
+immutable raw signal archive
+        ↓
+staleness / completeness gate
+        ↓
+Hyperliquid account + market state
+        ↓
+Hyperliquid cash-flow ledger sync
+        ↓
+unitized NAV / compound nominal
+        ↓
+1/3 Momentum + 1/3 Trend + 1/3 Carry
+        ↓
+RW ewvol inverse-vol scaling
+        ↓
+±25% asset cap / ≤100% gross cap
+        ↓
+2% relative trade-to-edge buffer
+        ↓
+risk and margin gate
+        ↓
+Hyperliquid BBO
+        ↓
+deterministic ALO order intents
+        ↓
+persistent pre-live decision ledger
+        ↓
+YOLO health summary
+        ↓
+STOP — no signed order transmission
+```
 
 ## Production portfolio logic
 
-The production baseline intentionally stays simple and close to the Robot Wealth trade helper.
-
 For each asset:
 
-1. Combine the megafactors:
+1. `raw_weight = (momentum*M + trend*T + carry*C) / 3`
+2. `vol_scaled = raw_weight / RW_ewvol`
+3. clip each asset to `+/- YOLO_MAX_ASSET_WEIGHT` (default 25%)
+4. if gross exceeds `YOLO_MAX_GROSS_WEIGHT` (default 100%), proportionally scale the whole portfolio down
+5. multiply by the effective nominal allocation
 
-   `raw_weight = (momentum * M + trend * T + carry * C) / 3`
+Inverse volatility is the production baseline. There is no covariance/ERC estimator in the live path.
 
-2. Inverse-volatility scale using **Robot Wealth supplied `ewvol`**:
+## Robot Wealth data
 
-   `vol_scaled = raw_weight / ewvol`
+The client consumes:
 
-3. Clip each asset to `+/- 25%` by default.
+- `yolo/weights`
+- `yolo/volatilities`
 
-4. If gross exposure exceeds `100%`, proportionally scale the full portfolio back to `100%` gross.
+Fields include `ticker`, `arrival_price`, `date`, the three megafactors, `combo_weight`, and supplied `ewvol`.
 
-5. Multiply final weights by the **effective nominal allocation** to obtain target dollar notionals. In fixed mode this is `YOLO_NOMINAL_USD`; in compound mode it is the base nominal multiplied by cash-flow-adjusted YOLO NAV performance.
+Every response is stored in `state/yolo.sqlite` **before validation**, including the raw body and SHA-256 hash. Stale or malformed responses remain available for diagnosis but are rejected for trading.
 
-No covariance/ERC estimator is in the production path. ERC remains a possible research comparison later.
-
+The signal guard blocks on stale dates, a wrong-size universe, duplicate/missing tickers, mismatched weights/volatility universes or dates, non-positive price/volatility, non-finite factors, and non-200 responses.
 
 ## Compound sizing
 
-YOLO now supports two sizing modes:
-
-- `fixed` — `YOLO_NOMINAL_USD` remains constant.
-- `compound` — `YOLO_NOMINAL_USD` is the **base nominal**, and the live planner scales it by YOLO's unitized NAV performance.
-
-The compounding formula is effectively:
-
-`effective_nominal = base_nominal * NAV_per_unit / initial_NAV_per_unit`
-
-The first compound live-data run initializes `NAV_per_unit = 1.0`. If the dedicated YOLO subaccount subsequently gains 10%, the nominal allocation also rises 10%. If it loses 10%, nominal falls 10%. This changes only the dollar scale; the Robot Wealth factor weights, inverse-vol logic, caps, gross constraint, and buffer are unchanged.
-
-### Deposits and withdrawals do not count as returns
-
-The sizing ledger is **unitized**, similar to a fund NAV. External cash flows change the number of strategy units rather than NAV-per-unit. This prevents a deposit from looking like profit or a withdrawal from looking like a loss.
-
-After a deposit or withdrawal has posted to the YOLO Hyperliquid subaccount, record it immediately:
-
-```powershell
-python -m crypto_yolo.cli --record-flow 10000
-python -m crypto_yolo.cli --record-flow -5000
-```
-
-Positive values are deposits; negative values are withdrawals. The command reads the current Hyperliquid equity and issues/redeems strategy units at the inferred pre-flow NAV-per-unit.
-
-A dedicated YOLO subaccount is required by default in compound mode. This prevents P&L from another strategy in a shared account from changing YOLO's sizing. The guard can be disabled explicitly, but that is not recommended.
-
-### Compounding guardrails
-
-The raw performance multiplier is clipped before it reaches position sizing:
+Two modes are supported:
 
 ```text
-YOLO_MIN_NOMINAL_MULTIPLIER=0.25
-YOLO_MAX_NOMINAL_MULTIPLIER=3.00
+YOLO_SIZING_MODE=fixed
+YOLO_SIZING_MODE=compound
 ```
 
-For a $50,000 base nominal, those defaults bound the effective nominal between $12,500 and $150,000 even if the raw unitized NAV multiplier moves outside that range. All normal margin/risk checks still run afterward.
+In compound mode:
 
-If you intentionally change the base nominal or want to establish a fresh compounding inception point, rebase explicitly:
+```text
+effective nominal = base nominal × unitized YOLO NAV performance
+```
+
+A dedicated `HL_YOLO_SUBACCOUNT_ADDRESS` is required by default so unrelated strategies cannot contaminate YOLO NAV.
+
+### Automatic cash-flow accounting
+
+v0.5 reads Hyperliquid `userNonFundingLedgerUpdates`. Recognized deposits, withdrawals, subaccount transfers, internal transfers, and perp account-class transfers are treated as external strategy cash flows rather than P&L.
+
+To avoid making deposits look like performance, YOLO also reads Hyperliquid `portfolio` history and uses the latest **perp account-value observation before each transfer** to issue/redeem strategy units at the contemporaneous NAV. If it cannot establish a pre-flow account value, it refuses to approximate and blocks the run.
+
+Ambiguous/non-YOLO ledger events are persisted as `manual_review` and fail closed. Inspect them with:
+
+```powershell
+python -m crypto_yolo.cli --cashflow-status
+```
+
+If an event is understood and you intentionally want to establish a clean new baseline, use:
 
 ```powershell
 python -m crypto_yolo.cli --rebase-compounding
 ```
 
-You can inspect the current unitized state at any time:
+A rebase resets NAV-per-unit to 1.0 at current YOLO equity, resets the cash-flow cursor, and acknowledges previously reviewed ambiguous events. `--record-flow` remains only as an emergency/admin fallback.
 
-```powershell
-python -m crypto_yolo.cli --sizing-status
-```
+## Hyperliquid pre-live staging
 
-Sizing decisions and cash-flow events are persisted in the same local `state/yolo.sqlite` audit database.
-
-## Robot Wealth live inputs
-
-The client uses:
-
-- `https://api.robotwealth.com/v1/yolo/weights`
-- `https://api.robotwealth.com/v1/yolo/volatilities`
-
-and joins the current point-in-time fields including:
-
-- `ticker`
-- `arrival_price`
-- `date`
-- `momentum_megafactor`
-- `trend_megafactor`
-- `carry_megafactor`
-- `combo_weight`
-- `ewvol`
-
-`arrival_price` is retained for future transaction-cost analysis. Hyperliquid mark prices are used to value the current account and calculate executable quantities.
-
-## Immutable signal archive
-
-Every received Robot Wealth response is written to `state/yolo.sqlite` **before portfolio construction and before staleness validation**.
-
-The archive keeps:
-
-- UTC pull timestamp
-- endpoint
-- HTTP status
-- vendor payload date when available
-- SHA-256 hash of the raw response
-- complete raw response body
-- validation status and rejection reason
-- whether the payload was used to construct a trade plan
-- a separate reserved flag for whether it was actually used in a future live rebalance
-- normalized joined YOLO signal rows
-
-This means even a stale or malformed vendor response remains available for later diagnosis.
-
-The database is deliberately local and ignored by Git.
-
-## Staleness / fail-closed guard
-
-The live planner refuses to proceed if any of these checks fail:
-
-- payload date is not the expected current UTC date
-- YOLO universe is not the configured size (default: 10)
-- duplicate tickers
-- weights and volatility payloads do not match by ticker
-- weights/volatility dates conflict when both are supplied
-- missing/non-positive `arrival_price`
-- missing/non-positive `ewvol`
-- non-finite factor values
-- non-200 RW response
-
-A rejected payload is still archived first.
-
-For historical/replay plumbing tests, `--expected-date YYYY-MM-DD` can override the expected date.
-
-## Hyperliquid read-only integration
-
-The live planner calls Hyperliquid's public `/info` endpoint for:
+The read-only client currently uses Hyperliquid `/info` for:
 
 - `clearinghouseState`
 - `metaAndAssetCtxs`
+- `l2Book`
+- `userNonFundingLedgerUpdates`
+- `portfolio`
+- `orderStatus` by client order ID (reconciliation scaffold)
 
-This gives the planner:
+For every trade above `YOLO_MIN_ORDER_USD`, v0.5 creates an ALO intent:
 
-- current positions
-- mark prices
-- account value
-- notional exposure
-- margin used
-- withdrawable collateral
-- per-asset quantity precision (`szDecimals`)
+- BUY → current best bid
+- SELL → current best ask
+- `tif = Alo`
+- universe exits are marked `reduce_only`
+- quantity uses Hyperliquid `szDecimals`
+- a deterministic `cloid` is generated for future idempotent submission
+- proposed TCA versus RW `arrival_price` is stored
 
-No private key is required for this version.
+Because the BBO prices come from Hyperliquid itself, the preview uses currently valid exchange price levels rather than inventing tick-size rounding rules.
 
-A dedicated YOLO Hyperliquid subaccount is preferred. If `HL_YOLO_SUBACCOUNT_ADDRESS` is set, that address is used instead of the master account address.
+## Idempotency / restart preparation
 
-## Trade buffer
+`rebalance_runs` and `trade_intents` are persisted to SQLite. Identical pre-live runs deduplicate by a deterministic run key.
 
-Default buffer is now `2%`.
+A separate `execution_locks` table is already present for the final live patch. Planning does **not** acquire the lock; next week's execution layer will reserve one execution per signal date/network/account before transmitting anything.
 
-The current implementation retains the relative trade-helper form:
+The schema also reserves transmitted/order-status fields, and `reconcile_orders.py` can query transmitted intents by `cloid` once live submission exists.
 
-`abs(current_weight - target_weight) <= buffer * abs(target_weight)`
+## Health summary
 
-Two modes are available:
+Every real pre-live run prints a concise system check covering:
 
-- `edge` — preferred: when breached, trade only back to the nearest buffer edge.
-- `target` — when breached, trade all the way to target.
+- current RW signal
+- signal archive
+- Hyperliquid account state
+- cash-flow ledger
+- fixed/compound sizing
+- risk gate
+- ALO order construction
+- execution-lock state
+- live-execution interlock
 
-Hyperliquid quantity precision is applied to the dry-run order quantity.
+Example shape:
 
-## Universe changes
+```text
+YOLO HEALTH
+overall: PRE-LIVE READY
+[OK  ] RW signals             current for 2026-09-03
+[OK  ] Signal archive         snapshot 42 persisted
+[OK  ] Hyperliquid state      MAINNET; equity $20,000.00
+[OK  ] Cash-flow ledger       no new external cash flows
+[OK  ] Sizing                 compound; effective nominal $52,300.00
+[OK  ] Risk gate              approved
+[OK  ] ALO construction       6 would-submit intent(s)
+[OK  ] Idempotency            no execution lock for this signal date
+[OK  ] Execution interlock    order transmission is disabled in v0.5
+```
 
-By default, an existing Hyperliquid position that is no longer present in the current RW YOLO universe receives a controlled target of zero.
+You can inspect the latest persisted run later with:
 
-Set:
+```powershell
+python -m crypto_yolo.cli --health-status
+```
 
-`YOLO_CLOSE_NON_UNIVERSE_POSITIONS=false`
+A richer Streamlit operations/dashboard summary can come after the execution path is proven.
 
-only if the account/subaccount intentionally contains positions belonging to another strategy.
+## Deployment controls
 
-This is one reason a dedicated YOLO subaccount is strongly preferred.
+Use explicit modes rather than relying on double-negative booleans:
+
+```text
+YOLO_NETWORK=testnet
+YOLO_EXECUTION_MODE=plan
+```
+
+or for real account **read-only planning**:
+
+```text
+YOLO_NETWORK=mainnet
+YOLO_EXECUTION_MODE=plan
+```
+
+v0.5 intentionally rejects:
+
+```text
+YOLO_EXECUTION_MODE=execute
+```
+
+The old `DRY_RUN` and `HYPERLIQUID_TESTNET` settings remain as compatibility fallbacks, but the new settings take precedence.
 
 ## Setup on Windows
 
-This repository uses a packaged `src/` layout. Install it once in editable mode so `crypto_yolo` is importable from normal Python commands:
+This project uses a packaged `src/` layout.
 
 ```powershell
 python -m pip install -e .
-```
-
-If you prefer `uv` for package scaffolding/install commands without creating a project virtual environment:
-
-```powershell
-uv pip install --system -e .
-```
-
-Then:
-
-```powershell
 python -m unittest discover -s tests -v
 ```
 
-## Configuration
+Or with uv while continuing to use your system interpreter:
 
-Copy `.env.example` to `.env` and fill in only your own values:
+```powershell
+uv pip install --system -e .
+python -m unittest discover -s tests -v
+```
+
+Copy configuration:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-The CLI loads this simple `.env` automatically. Existing process environment variables override values in the file.
-
-Important live-data settings:
+For compound mainnet planning, the important fields are:
 
 ```text
-RW_API_KEY=
-HL_ACCOUNT_ADDRESS=
-HL_YOLO_SUBACCOUNT_ADDRESS=
+RW_API_KEY=...
+HL_ACCOUNT_ADDRESS=0x...
+HL_YOLO_SUBACCOUNT_ADDRESS=0x...
 
-YOLO_NOMINAL_USD=50000
+YOLO_NETWORK=mainnet
+YOLO_EXECUTION_MODE=plan
 YOLO_SIZING_MODE=compound
-YOLO_MIN_NOMINAL_MULTIPLIER=0.25
-YOLO_MAX_NOMINAL_MULTIPLIER=3.00
-YOLO_REQUIRE_DEDICATED_SUBACCOUNT_FOR_COMPOUND=true
+YOLO_NOMINAL_USD=50000
 YOLO_TRADE_BUFFER=0.02
-YOLO_BUFFER_MODE=edge
-YOLO_MAX_ASSET_WEIGHT=0.25
-YOLO_MAX_GROSS_WEIGHT=1.0
-YOLO_MAX_MARGIN_UTILIZATION=0.60
-
-DRY_RUN=true
-HYPERLIQUID_TESTNET=true
 ```
 
-`YOLO_NOMINAL_USD` remains the intuitive strategy sizing knob. In `fixed` mode it is the actual nominal; in `compound` mode it is the inception/base nominal that compounds with unitized YOLO performance. Exchange collateral is not the same thing as strategy nominal allocation.
+No private key belongs in v0.5.
 
-## Fixture preview
+## Commands
+
+Fixture calculation:
 
 ```powershell
 python -m crypto_yolo.cli --fixture examples/sample_snapshot.json
 ```
 
-## Real live-data dry run
-
-Once `RW_API_KEY` and the Hyperliquid account/subaccount address are configured:
+Full real pre-live run:
 
 ```powershell
 python -m crypto_yolo.cli --live-data
 ```
 
-The sequence is:
-
-```text
-RW yolo/weights
-RW yolo/volatilities
-        ↓
-archive both raw payloads
-        ↓
-staleness + completeness gate
-        ↓
-join factors + supplied ewvol
-        ↓
-inverse-vol YOLO targets
-        ↓
-Hyperliquid marks + positions + margin state
-        ↓
-unitized NAV → effective nominal (compound mode)
-        ↓
-2% trade buffer
-        ↓
-exchange-precision trade quantities
-        ↓
-risk summary
-        ↓
-DRY-RUN trade plan
-```
-
-This version always stops there. **No order API exists in the code yet.**
-
-## Inspect the local RW archive
+Archive:
 
 ```powershell
 python -m crypto_yolo.cli --archive-status
 ```
 
-This shows recent endpoint pulls, dates, HTTP codes, and whether they were accepted or rejected.
+Health:
 
-## Next milestone
+```powershell
+python -m crypto_yolo.cli --health-status
+```
 
-After several clean real-data dry runs with the signal archive and sizing ledger:
+Cash-flow audit:
 
-1. persist the complete decision/trade-plan ledger
-2. add Hyperliquid testnet ALO/post-only execution
-3. persist orders, cancellations, reprices, fills, and fees
-4. reconcile post-trade state against the intended buffer destination
-5. compute TCA versus RW `arrival_price`
-6. only then add an explicitly gated live mode
+```powershell
+python -m crypto_yolo.cli --cashflow-status
+```
 
-The point-in-time signal archive will also become the input history for later independent validation and EdgeLab experiments.
+Compounding state:
+
+```powershell
+python -m crypto_yolo.cli --sizing-status
+```
+
+## Final live-execution patch
+
+Once several real mainnet `plan` runs are clean, the remaining work is intentionally narrow:
+
+1. add the official Hyperliquid Python SDK / API-wallet signer
+2. reserve the daily execution lock before transmission
+3. submit the already-persisted ALO intents using their deterministic `cloid`s
+4. reconcile resting/partial/filled/cancelled state by `cloid`
+5. cancel/reprice ALO attempts under a bounded policy
+6. persist fills/fees and run post-trade buffer verification
+7. compute realized TCA vs RW `arrival_price`
+8. mark the signal snapshot as actually rebalanced only after reconciliation succeeds
+
+The alpha, inverse-vol sizing, compounding, signal archive, risk gate, and order-intent construction should not need to change for live launch.

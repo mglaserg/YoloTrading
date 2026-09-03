@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -69,7 +70,7 @@ class SignalArchive:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with self._db() as conn:
             conn.executescript(SCHEMA)
             self._ensure_columns(conn)
 
@@ -87,9 +88,18 @@ class SignalArchive:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @contextmanager
+    def _db(self):
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def record_pull(self, response: RawApiResponse, payload_date: str | None = None) -> int:
         digest = hashlib.sha256(response.raw_text.encode("utf-8")).hexdigest()
-        with self._connect() as conn:
+        with self._db() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO api_pulls (
@@ -110,7 +120,7 @@ class SignalArchive:
             return int(cur.lastrowid)
 
     def mark_pull_validation(self, pull_id: int, status: str, message: str | None = None) -> None:
-        with self._connect() as conn:
+        with self._db() as conn:
             conn.execute(
                 "UPDATE api_pulls SET validation_status=?, validation_message=? WHERE id=?",
                 (status, message, pull_id),
@@ -128,7 +138,7 @@ class SignalArchive:
         validation_message: str | None = None,
     ) -> int:
         rows = list(signals)
-        with self._connect() as conn:
+        with self._db() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO signal_snapshots (
@@ -171,7 +181,7 @@ class SignalArchive:
             return snapshot_id
 
     def mark_snapshot_planned(self, snapshot_id: int) -> None:
-        with self._connect() as conn:
+        with self._db() as conn:
             row = conn.execute(
                 "SELECT weights_pull_id, volatilities_pull_id FROM signal_snapshots WHERE id=?",
                 (snapshot_id,),
@@ -188,7 +198,7 @@ class SignalArchive:
                 )
 
     def mark_snapshot_rebalanced(self, snapshot_id: int) -> None:
-        with self._connect() as conn:
+        with self._db() as conn:
             row = conn.execute(
                 "SELECT weights_pull_id, volatilities_pull_id FROM signal_snapshots WHERE id=?",
                 (snapshot_id,),
@@ -205,8 +215,31 @@ class SignalArchive:
                 )
 
     def recent_pulls(self, limit: int = 20) -> list[dict]:
-        with self._connect() as conn:
+        with self._db() as conn:
             rows = conn.execute(
                 "SELECT * FROM api_pulls ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(row) for row in rows]
+    def snapshot_fingerprint(self, snapshot_id: int) -> str:
+        with self._db() as conn:
+            row = conn.execute(
+                """
+                SELECT w.response_sha256 AS weights_hash, v.response_sha256 AS vols_hash
+                FROM signal_snapshots s
+                LEFT JOIN api_pulls w ON s.weights_pull_id=w.id
+                LEFT JOIN api_pulls v ON s.volatilities_pull_id=v.id
+                WHERE s.id=?
+                """,
+                (snapshot_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown signal snapshot {snapshot_id}")
+        raw = f"{row['weights_hash'] or ''}|{row['vols_hash'] or ''}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def latest_snapshot(self) -> dict | None:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT * FROM signal_snapshots ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return None if row is None else dict(row)

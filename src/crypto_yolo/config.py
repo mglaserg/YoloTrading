@@ -45,6 +45,12 @@ class YoloConfig:
     rw_base_url: str = "https://api.robotwealth.com/v1"
     hl_account_address: str = ""
     hl_subaccount_address: str = ""
+    network: str = "testnet"
+    execution_mode: str = "plan"
+    auto_sync_cash_flows: bool = True
+    cashflow_lookback_days: int = 7
+    min_order_usd: float = 10.0
+    # Backward-compatible aliases retained through v0.5.
     hyperliquid_testnet: bool = True
     dry_run: bool = True
 
@@ -53,13 +59,27 @@ class YoloConfig:
         return Path(self.data_dir) / "yolo.sqlite"
 
     @property
+    def normalized_network(self) -> str:
+        value = self.network.strip().lower()
+        if value in {"testnet", "mainnet"}:
+            return value
+        raise ValueError(f"unknown YOLO_NETWORK={self.network!r}; use testnet or mainnet")
+
+    @property
+    def normalized_execution_mode(self) -> str:
+        value = self.execution_mode.strip().lower()
+        if value in {"plan", "execute"}:
+            return value
+        raise ValueError(f"unknown YOLO_EXECUTION_MODE={self.execution_mode!r}; use plan or execute")
+
+    @property
     def hyperliquid_api_url(self) -> str:
         override = os.getenv("HL_API_URL", "").strip()
         if override:
             return override.rstrip("/")
         return (
             "https://api.hyperliquid-testnet.xyz"
-            if self.hyperliquid_testnet
+            if self.normalized_network == "testnet"
             else "https://api.hyperliquid.xyz"
         )
 
@@ -69,6 +89,10 @@ class YoloConfig:
 
     @classmethod
     def from_env(cls) -> "YoloConfig":
+        legacy_testnet = _b("HYPERLIQUID_TESTNET", True)
+        legacy_dry_run = _b("DRY_RUN", True)
+        network = os.getenv("YOLO_NETWORK", "testnet" if legacy_testnet else "mainnet")
+        execution_mode = os.getenv("YOLO_EXECUTION_MODE", "plan" if legacy_dry_run else "execute")
         return cls(
             nominal_usd=_f("YOLO_NOMINAL_USD", 50_000),
             sizing_mode=os.getenv("YOLO_SIZING_MODE", "fixed"),
@@ -93,6 +117,11 @@ class YoloConfig:
             rw_base_url=os.getenv("RW_BASE_URL", "https://api.robotwealth.com/v1"),
             hl_account_address=os.getenv("HL_ACCOUNT_ADDRESS", ""),
             hl_subaccount_address=os.getenv("HL_YOLO_SUBACCOUNT_ADDRESS", ""),
-            hyperliquid_testnet=_b("HYPERLIQUID_TESTNET", True),
-            dry_run=_b("DRY_RUN", True),
+            network=network,
+            execution_mode=execution_mode,
+            auto_sync_cash_flows=_b("YOLO_AUTO_SYNC_CASH_FLOWS", True),
+            cashflow_lookback_days=_i("YOLO_CASHFLOW_LOOKBACK_DAYS", 7),
+            min_order_usd=_f("YOLO_MIN_ORDER_USD", 10.0),
+            hyperliquid_testnet=legacy_testnet,
+            dry_run=legacy_dry_run,
         )

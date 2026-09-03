@@ -44,3 +44,26 @@ class ProviderParsingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class HyperliquidBboTests(unittest.TestCase):
+    def test_bbo_parses_two_sided_book(self):
+        class Client(HyperliquidReadOnlyClient):
+            def _post_info(self, body):
+                return {"levels": [[{"px": "99.5", "sz": "1"}], [{"px": "100.5", "sz": "1"}]]}
+        quote = Client("0xuser").fetch_bbo("BTC")
+        self.assertEqual(quote.bid_price, 99.5)
+        self.assertEqual(quote.ask_price, 100.5)
+
+    def test_non_funding_ledger_request_shape(self):
+        calls = []
+        class Client(HyperliquidReadOnlyClient):
+            def _post_info(self, body):
+                calls.append(body)
+                return []
+        c = Client("0xuser")
+        c.fetch_non_funding_ledger_updates(100, 200)
+        self.assertEqual(calls[0]["type"], "userNonFundingLedgerUpdates")
+        self.assertEqual(calls[0]["startTime"], 100)
+        self.assertEqual(calls[0]["endTime"], 200)
+        c.fetch_portfolio_history()
+        self.assertEqual(calls[1]["type"], "portfolio")

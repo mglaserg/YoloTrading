@@ -104,3 +104,34 @@ class TradePlanRow:
     within_buffer_after: bool
     arrival_price: float | None = None
     is_universe_exit: bool = False
+
+@dataclass(frozen=True)
+class BboQuote:
+    ticker: str
+    bid_price: float
+    ask_price: float
+    pulled_at_utc: datetime
+
+
+@dataclass(frozen=True)
+class OrderIntent:
+    ticker: str
+    side: str
+    quantity: float
+    limit_price: float
+    trade_value_usd: float
+    tif: str
+    reduce_only: bool
+    cloid: str
+    arrival_price: float | None
+    target_weight: float
+    current_weight: float
+    destination_weight: float
+    status: str = "planned"
+
+    @property
+    def proposed_tca_bps(self) -> float | None:
+        if self.arrival_price is None or self.arrival_price <= 0:
+            return None
+        signed = 1.0 if self.side == "BUY" else -1.0
+        return signed * (self.limit_price / self.arrival_price - 1.0) * 10_000.0

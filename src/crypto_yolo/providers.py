@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .models import (
+    BboQuote,
     ExchangeSnapshot,
     MarketSpec,
     Position,
@@ -78,7 +79,7 @@ class RobotWealthClient:
             raise RuntimeError("RW_API_KEY is required for live Robot Wealth pulls")
         query = urlencode({"api_key": self.api_key})
         url = f"{self.base_url.rstrip('/')}/{endpoint}?{query}"
-        request = Request(url, headers={"Accept": "application/json", "User-Agent": "crypto-yolo/0.4"})
+        request = Request(url, headers={"Accept": "application/json", "User-Agent": "crypto-yolo/0.5"})
         pulled_at = _utcnow()
         status = 0
         raw = ""
@@ -176,6 +177,9 @@ class HyperliquidReadOnlyClient:
     def _post_info(self, body: dict[str, Any]) -> Any:
         if not self.user_address:
             raise RuntimeError("HL_ACCOUNT_ADDRESS or HL_YOLO_SUBACCOUNT_ADDRESS is required")
+        body = dict(body)
+        if isinstance(body.get("user"), str):
+            body["user"] = body["user"].lower()
         raw_body = json.dumps(body).encode("utf-8")
         request = Request(
             f"{self.api_url.rstrip('/')}/info",
@@ -189,6 +193,35 @@ class HyperliquidReadOnlyClient:
         except (HTTPError, URLError) as exc:
             raise RuntimeError(f"Hyperliquid info request failed: {exc}") from exc
         return json.loads(raw)
+
+    def fetch_portfolio_history(self) -> Any:
+        return self._post_info({"type": "portfolio", "user": self.user_address})
+
+    def fetch_non_funding_ledger_updates(self, start_time_ms: int, end_time_ms: int | None = None) -> Any:
+        body: dict[str, Any] = {
+            "type": "userNonFundingLedgerUpdates",
+            "user": self.user_address,
+            "startTime": int(start_time_ms),
+        }
+        if end_time_ms is not None:
+            body["endTime"] = int(end_time_ms)
+        return self._post_info(body)
+
+    def fetch_bbo(self, ticker: str) -> BboQuote:
+        payload = self._post_info({"type": "l2Book", "coin": ticker})
+        if not isinstance(payload, dict):
+            raise ValueError(f"unexpected Hyperliquid l2Book response for {ticker}")
+        levels = payload.get("levels")
+        if not isinstance(levels, list) or len(levels) < 2 or not levels[0] or not levels[1]:
+            raise ValueError(f"Hyperliquid book is missing a two-sided BBO for {ticker}")
+        bid = _as_float(levels[0][0].get("px"), f"{ticker}.bestBid")
+        ask = _as_float(levels[1][0].get("px"), f"{ticker}.bestAsk")
+        if bid <= 0 or ask <= 0 or bid >= ask:
+            raise ValueError(f"invalid Hyperliquid BBO for {ticker}: bid={bid}, ask={ask}")
+        return BboQuote(ticker=ticker, bid_price=bid, ask_price=ask, pulled_at_utc=_utcnow())
+
+    def query_order_status_by_cloid(self, cloid: str) -> Any:
+        return self._post_info({"type": "orderStatus", "user": self.user_address, "oid": cloid})
 
     def fetch_account_snapshot(self) -> ExchangeSnapshot:
         pulled_at = _utcnow()
