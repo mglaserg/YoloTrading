@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timezone
-from typing import Any
+from datetime import date, datetime, timezone
+import time
+from typing import Any, Callable
 
 from .archive import SignalArchive
 from .config import YoloConfig
@@ -103,3 +104,64 @@ def fetch_live_inputs(
     )
     exchange = hl.fetch_account_snapshot()
     return LiveInputs(signals, signal_date, snapshot_id, exchange)
+
+
+def _retryable_wait_error(exc: Exception) -> bool:
+    """Return True only for conditions that can reasonably clear during the publish window."""
+    text = str(exc).lower()
+    return (
+        "stale rw signal date" in text
+        or "transport error" in text
+        or "http 429" in text
+        or "http 500" in text
+        or "http 502" in text
+        or "http 503" in text
+        or "http 504" in text
+    )
+
+
+def wait_for_live_inputs(
+    config: YoloConfig,
+    *,
+    expected_date: date | None = None,
+    poll_seconds: float | None = None,
+    wait_minutes: float | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    monotonic_fn: Callable[[], float] = time.monotonic,
+    status_fn: Callable[[str], None] = print,
+) -> LiveInputs:
+    """Poll RW until today's signal is published, then fetch Hyperliquid once.
+
+    Each RW attempt still flows through ``fetch_live_inputs`` so every vendor response is
+    archived before validation. Malformed current payloads fail immediately; stale data and
+    transient transport/server conditions retry within the bounded publish window.
+    """
+    expected = expected_date or datetime.now(timezone.utc).date()
+    interval = config.signal_poll_seconds if poll_seconds is None else float(poll_seconds)
+    window_minutes = config.signal_wait_minutes if wait_minutes is None else float(wait_minutes)
+    if interval <= 0:
+        raise ValueError("signal poll interval must be positive")
+    if window_minutes <= 0:
+        raise ValueError("signal wait window must be positive")
+
+    deadline = monotonic_fn() + (window_minutes * 60.0)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return fetch_live_inputs(config, expected_date=expected)
+        except (SignalValidationError, RuntimeError) as exc:
+            if not _retryable_wait_error(exc):
+                raise
+            remaining = deadline - monotonic_fn()
+            if remaining <= 0:
+                raise SignalValidationError(
+                    f"RW signal did not become current for {expected.isoformat()} within "
+                    f"{window_minutes:g} minute(s); last error: {exc}"
+                ) from exc
+            delay = min(interval, remaining)
+            status_fn(
+                f"RW SIGNAL WAIT: attempt {attempt} not ready — {exc}; "
+                f"retrying in {delay:g}s"
+            )
+            sleep_fn(delay)

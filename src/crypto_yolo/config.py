@@ -50,6 +50,8 @@ class YoloConfig:
     auto_sync_cash_flows: bool = True
     cashflow_lookback_days: int = 7
     min_order_usd: float = 10.0
+    signal_poll_seconds: float = 30.0
+    signal_wait_minutes: float = 15.0
     # Backward-compatible aliases retained through v0.5.
     hyperliquid_testnet: bool = True
     dry_run: bool = True
@@ -122,6 +124,8 @@ class YoloConfig:
             auto_sync_cash_flows=_b("YOLO_AUTO_SYNC_CASH_FLOWS", True),
             cashflow_lookback_days=_i("YOLO_CASHFLOW_LOOKBACK_DAYS", 7),
             min_order_usd=_f("YOLO_MIN_ORDER_USD", 10.0),
+            signal_poll_seconds=_f("YOLO_SIGNAL_POLL_SECONDS", 30.0),
+            signal_wait_minutes=_f("YOLO_SIGNAL_WAIT_MINUTES", 15.0),
             hyperliquid_testnet=legacy_testnet,
             dry_run=legacy_dry_run,
         )

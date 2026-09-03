@@ -11,7 +11,7 @@ from .cashflows import CashFlowLedger, CashFlowSyncError, CashFlowSyncResult
 from .config import YoloConfig
 from .env import load_env_file
 from .health import HealthCheck, HealthSummary, print_health
-from .live import fetch_live_inputs
+from .live import fetch_live_inputs, wait_for_live_inputs
 from .models import Position, SignalRow
 from .planner import plan_trades
 from .portfolio import build_targets
@@ -224,6 +224,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Preview a Crypto YOLO rebalance")
     parser.add_argument("--fixture", type=Path, default=Path("examples/sample_snapshot.json"))
     parser.add_argument("--live-data", action="store_true", help="Pull real RW + Hyperliquid read-only data and build pre-live ALO intents")
+    parser.add_argument("--wait-for-signal", action="store_true", help="Linux/daemon mode: poll RW until today's signal is current, then run one pre-live plan")
     parser.add_argument("--expected-date", type=date.fromisoformat, default=None)
     parser.add_argument("--buffer-mode", choices=["edge", "target"], default=None)
     parser.add_argument("--archive-status", action="store_true", help="Show the most recent archived RW pulls")
@@ -332,9 +333,12 @@ def main() -> None:
             print(f"raw nominal:       ${status.latest_effective_nominal_usd:,.2f}")
         return
 
-    if args.live_data:
+    if args.live_data or args.wait_for_signal:
         try:
-            live = fetch_live_inputs(config, expected_date=args.expected_date)
+            if args.wait_for_signal:
+                live = wait_for_live_inputs(config, expected_date=args.expected_date)
+            else:
+                live = fetch_live_inputs(config, expected_date=args.expected_date)
             client = _hl_client(config)
             cashflow_result = _cashflow_sync(config, ledger, live.exchange, client)
             sizing = ledger.decision(account_value_usd=live.exchange.account_value_usd, config=config)

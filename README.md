@@ -289,3 +289,92 @@ Once several real mainnet `plan` runs are clean, the remaining work is intention
 8. mark the signal snapshot as actually rebalanced only after reconciliation succeeds
 
 The alpha, inverse-vol sizing, compounding, signal archive, risk gate, and order-intent construction should not need to change for live launch.
+
+## Linux deployment (recommended production target)
+
+YOLO is scheduler-independent internally, but v0.5.1 includes a bounded signal-publish runner and `systemd` units for an unattended Linux host. No virtual environment is required for this deployment path.
+
+The timer is UTC-native:
+
+```text
+09:01:00 UTC  systemd starts YOLO
+              ↓
+pull + archive RW weights/volatilities
+              ↓
+current signal?
+  no  → retry every YOLO_SIGNAL_POLL_SECONDS
+  yes → build exactly one pre-live plan and exit
+              ↓
+stop after YOLO_SIGNAL_WAIT_MINUTES if RW never becomes current
+```
+
+Every stale/rejected RW response still goes through the immutable signal archive. Malformed current payloads fail immediately rather than being retried as though they were merely late. Defaults:
+
+```text
+YOLO_SIGNAL_POLL_SECONDS=30
+YOLO_SIGNAL_WAIT_MINUTES=15
+```
+
+Manual Linux test of the same production path from the repo root:
+
+```bash
+PYTHONPATH=src python3 -m crypto_yolo.cli --wait-for-signal
+```
+
+### systemd
+
+The repository includes:
+
+```text
+deploy/systemd/yolo-daily.service
+deploy/systemd/yolo-daily.timer
+deploy/install-systemd.sh
+```
+
+A typical dedicated-host setup is:
+
+```bash
+sudo useradd --system --home /opt/yolotrading --shell /usr/sbin/nologin yolo
+sudo mkdir -p /opt/yolotrading
+sudo chown -R yolo:yolo /opt/yolotrading
+# clone/copy this repository into /opt/yolotrading
+# create /opt/yolotrading/.env and chmod 600 it
+```
+
+The service imports directly from `/opt/yolotrading/src`, so v0.5.1 does not require `pip install`, `uv sync`, or a project `.venv`. Future third-party execution dependencies can be installed into the host Python with your preferred system-level `uv` workflow.
+
+Confirm the application starts as the service user before enabling the timer:
+
+```bash
+sudo -u yolo bash -c 'cd /opt/yolotrading && PYTHONPATH=src /usr/bin/python3 -m crypto_yolo.cli --health-status'
+```
+
+Install the units:
+
+```bash
+cd /opt/yolotrading
+sudo bash deploy/install-systemd.sh /opt/yolotrading yolo /usr/bin/python3
+```
+
+Check the schedule:
+
+```bash
+systemctl list-timers yolo-daily.timer
+```
+
+Watch a run:
+
+```bash
+journalctl -u yolo-daily.service -f
+```
+
+Run it immediately without waiting for 09:01 UTC:
+
+```bash
+sudo systemctl start yolo-daily.service
+journalctl -u yolo-daily.service -n 200 --no-pager
+```
+
+The service writes its SQLite/audit state to `/var/lib/yolotrading`, which `systemd` creates with restrictive permissions. The source checkout and `.env` remain read-only to the hardened service.
+
+The timer uses `OnCalendar=*-*-* 09:01:00 UTC`, so daylight-saving changes on the host never change YOLO's signal time. It intentionally uses `Persistent=false`: if the host is powered off at 09:01 UTC, YOLO does **not** automatically perform a late catch-up run after boot. That is the safer default for eventual live trading; a missed run can be inspected and started manually.
