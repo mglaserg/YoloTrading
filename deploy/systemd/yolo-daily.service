@@ -1,26 +1,17 @@
 [Unit]
 Description=Crypto YOLO daily pre-live planner
-Wants=network-online.target time-sync.target
-After=network-online.target time-sync.target
-
 [Service]
 Type=oneshot
-User=yolo
-Group=yolo
-WorkingDirectory=/opt/yolotrading
+WorkingDirectory=@REPO_DIR@
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-Environment=PYTHONPATH=/opt/yolotrading/src
-Environment=YOLO_DATA_DIR=/var/lib/yolotrading
-ExecStart=/usr/bin/python3 -m crypto_yolo.cli --wait-for-signal
+Environment="YOLO_PYTHON=@PYTHON_BIN@"
+Environment="YOLO_DATA_DIR=@DATA_DIR@"
+ExecStart="@REPO_DIR@/bin/yolo" --wait-for-signal
 TimeoutStartSec=20min
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-StateDirectory=yolotrading
-StateDirectoryMode=0700
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

@@ -292,7 +292,16 @@ The alpha, inverse-vol sizing, compounding, signal archive, risk gate, and order
 
 ## Linux deployment (recommended production target)
 
-YOLO is scheduler-independent internally, but v0.5.1 includes a bounded signal-publish runner and `systemd` units for an unattended Linux host. No virtual environment is required for this deployment path.
+YOLO v0.5.2 is designed to run on Ubuntu/Lubuntu **without installing the project into the system Python and without creating a virtual environment**. Ubuntu may mark `/usr/bin/python3` as externally managed; YOLO avoids that issue by running directly from the repository `src/` tree.
+
+The repository includes a launcher that sets `PYTHONPATH` automatically:
+
+```bash
+./bin/yolo --health-status
+./bin/yolo --wait-for-signal
+```
+
+You do not need `pip install -e .`, `uv pip install --system`, `uv sync`, or `--break-system-packages` for this deployment path. Do **not** disable Ubuntu's externally-managed Python protection just to run YOLO.
 
 The timer is UTC-native:
 
@@ -315,66 +324,86 @@ YOLO_SIGNAL_POLL_SECONDS=30
 YOLO_SIGNAL_WAIT_MINUTES=15
 ```
 
-Manual Linux test of the same production path from the repo root:
+### First Linux smoke test
+
+From the repository root:
 
 ```bash
-PYTHONPATH=src python3 -m crypto_yolo.cli --wait-for-signal
+chmod +x bin/yolo
+./bin/yolo --health-status
+PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-### systemd
+The first command proves that the application can import directly from `src/` using the host's normal `python3`.
+
+### User-level systemd timer
+
+YOLO is intended to be one service on a general trading computer, not the only application on the host. The repository therefore installs a **user-level** `systemd` timer. No dedicated Linux account and no `/opt/yolotrading` layout are required.
 
 The repository includes:
 
 ```text
 deploy/systemd/yolo-daily.service
 deploy/systemd/yolo-daily.timer
-deploy/install-systemd.sh
+deploy/install-user-systemd.sh
+deploy/uninstall-user-systemd.sh
 ```
 
-A typical dedicated-host setup is:
+Clone the repository anywhere under your normal Linux account, for example:
 
-```bash
-sudo useradd --system --home /opt/yolotrading --shell /usr/sbin/nologin yolo
-sudo mkdir -p /opt/yolotrading
-sudo chown -R yolo:yolo /opt/yolotrading
-# clone/copy this repository into /opt/yolotrading
-# create /opt/yolotrading/.env and chmod 600 it
+```text
+~/trading/YoloTrading
 ```
 
-The service imports directly from `/opt/yolotrading/src`, so v0.5.1 does not require `pip install`, `uv sync`, or a project `.venv`. Future third-party execution dependencies can be installed into the host Python with your preferred system-level `uv` workflow.
-
-Confirm the application starts as the service user before enabling the timer:
+Create `.env` in the repository root and protect it:
 
 ```bash
-sudo -u yolo bash -c 'cd /opt/yolotrading && PYTHONPATH=src /usr/bin/python3 -m crypto_yolo.cli --health-status'
+chmod 600 .env
 ```
 
-Install the units:
+Install the timer **as your normal user, without sudo**:
 
 ```bash
-cd /opt/yolotrading
-sudo bash deploy/install-systemd.sh /opt/yolotrading yolo /usr/bin/python3
+cd ~/trading/YoloTrading
+bash deploy/install-user-systemd.sh
+```
+
+The installer writes units to `~/.config/systemd/user/`, points them at the current repository path, uses the current `python3`, and stores runtime SQLite/audit state under:
+
+```text
+~/.local/share/yolotrading
+```
+
+To allow the user timer to run while you are logged out, enable lingering once:
+
+```bash
+sudo loginctl enable-linger $USER
 ```
 
 Check the schedule:
 
 ```bash
-systemctl list-timers yolo-daily.timer
+systemctl --user list-timers yolo-daily.timer
+systemctl --user status yolo-daily.timer
 ```
 
-Watch a run:
+Run the scheduled workflow immediately for testing:
 
 ```bash
-journalctl -u yolo-daily.service -f
+systemctl --user start yolo-daily.service
+journalctl --user -u yolo-daily.service -n 200 --no-pager
 ```
 
-Run it immediately without waiting for 09:01 UTC:
+Watch a run live:
 
 ```bash
-sudo systemctl start yolo-daily.service
-journalctl -u yolo-daily.service -n 200 --no-pager
+journalctl --user -u yolo-daily.service -f
 ```
 
-The service writes its SQLite/audit state to `/var/lib/yolotrading`, which `systemd` creates with restrictive permissions. The source checkout and `.env` remain read-only to the hardened service.
+Remove the timer without deleting YOLO's runtime history:
 
-The timer uses `OnCalendar=*-*-* 09:01:00 UTC`, so daylight-saving changes on the host never change YOLO's signal time. It intentionally uses `Persistent=false`: if the host is powered off at 09:01 UTC, YOLO does **not** automatically perform a late catch-up run after boot. That is the safer default for eventual live trading; a missed run can be inspected and started manually.
+```bash
+bash deploy/uninstall-user-systemd.sh
+```
+
+The timer uses `OnCalendar=*-*-* 09:01:00 UTC` and `Persistent=false`. If the computer is powered off at 09:01 UTC, YOLO does **not** automatically perform a late catch-up run after boot. That is intentional for eventual live trading.
