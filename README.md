@@ -292,12 +292,13 @@ The alpha, inverse-vol sizing, compounding, signal archive, risk gate, and order
 
 ## Linux deployment (recommended production target)
 
-YOLO v0.5.2 is designed to run on Ubuntu/Lubuntu **without installing the project into the system Python and without creating a virtual environment**. Ubuntu may mark `/usr/bin/python3` as externally managed; YOLO avoids that issue by running directly from the repository `src/` tree.
+YOLO v0.5.3 is designed to run on Ubuntu/Lubuntu **without installing the project into the system Python and without creating a virtual environment**. Ubuntu may mark `/usr/bin/python3` as externally managed; YOLO avoids that issue by running directly from the repository `src/` tree.
 
 The repository includes a launcher that sets `PYTHONPATH` automatically:
 
 ```bash
 ./bin/yolo --health-status
+./bin/yolo --account-status
 ./bin/yolo --wait-for-signal
 ```
 
@@ -407,3 +408,13 @@ bash deploy/uninstall-user-systemd.sh
 ```
 
 The timer uses `OnCalendar=*-*-* 09:01:00 UTC` and `Persistent=false`. If the computer is powered off at 09:01 UTC, YOLO does **not** automatically perform a late catch-up run after boot. That is intentional for eventual live trading.
+
+## Hyperliquid Unified Account support
+
+YOLO auto-detects Hyperliquid account abstraction with `userAbstraction`.
+
+- **Unified Account:** account equity is read from `spotClearinghouseState` USDC `total`, while perp `clearinghouseState` is still used for open positions. This matches Hyperliquid's documented API model for unified accounts.
+- **Standard / disabled:** the existing perp `clearinghouseState.marginSummary.accountValue` path remains authoritative.
+- **Portfolio Margin:** deliberately fails closed for now because multi-asset portfolio-margin valuation requires a separate risk model.
+
+The live plan output prints both the detected account mode and account-value source so a zero-equity parsing error is immediately visible.

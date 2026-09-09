@@ -64,8 +64,12 @@ def _print_plan(targets, plan, risk, *, signal_date=None, exchange=None, sizing=
         print(f"RW signal date: {signal_date}")
         print("Signal status: CURRENT")
     if exchange is not None:
+        print(f"Hyperliquid account mode:  {exchange.account_mode}")
         print(f"Hyperliquid account value: ${exchange.account_value_usd:,.2f}")
-        print(f"Hyperliquid margin used:  ${exchange.total_margin_used_usd:,.2f}")
+        print(f"Hyperliquid value source:  {exchange.account_value_source}")
+        print(f"Hyperliquid margin used:   ${exchange.total_margin_used_usd:,.2f}")
+        if exchange.current_margin_ratio is not None:
+            print(f"Hyperliquid current margin ratio: {exchange.current_margin_ratio:.1%}")
     if sizing is not None:
         _print_sizing(sizing)
     print()
@@ -184,7 +188,12 @@ def _persist_and_print_prelive(*, config, live, sizing, targets, plan, risk, cas
     checks = (
         HealthCheck("RW signals", True, f"current for {live.signal_date.isoformat()}"),
         HealthCheck("Signal archive", True, f"snapshot {live.signal_snapshot_id} persisted"),
-        HealthCheck("Hyperliquid state", True, f"{config.normalized_network}; equity ${live.exchange.account_value_usd:,.2f}"),
+        HealthCheck(
+            "Hyperliquid state",
+            True,
+            f"{config.normalized_network}; {live.exchange.account_mode}; "
+            f"equity ${live.exchange.account_value_usd:,.2f}",
+        ),
         HealthCheck("Cash-flow ledger", cashflow_ok, cashflow_detail),
         HealthCheck("Sizing", True, f"{sizing.mode}; effective nominal ${sizing.effective_nominal_usd:,.2f}"),
         HealthCheck("Risk gate", risk.approved, "approved" if risk.approved else "; ".join(risk.reasons)),
@@ -231,6 +240,7 @@ def main() -> None:
     parser.add_argument("--health-status", action="store_true", help="Show the latest persisted pre-live health/run summary")
     parser.add_argument("--cashflow-status", action="store_true", help="Show recent detected Hyperliquid cash-flow ledger events")
     parser.add_argument("--sizing-status", action="store_true", help="Show current unitized compounding state using live Hyperliquid equity")
+    parser.add_argument("--account-status", action="store_true", help="Read Hyperliquid account mode, equity source, margin, and open positions only")
     parser.add_argument("--record-flow", type=float, default=None, metavar="USD", help="Manual emergency/admin cash-flow entry (+deposit, -withdrawal)")
     parser.add_argument("--rebase-compounding", action="store_true", help="Reset compounding baseline to current YOLO subaccount equity")
     args = parser.parse_args()
@@ -279,6 +289,26 @@ def main() -> None:
             print("No detected cash-flow ledger events stored yet.")
         for row in events:
             print(row["time_ms"], row["event_type"], row["classification"], f"{row['flow_usd']:+.2f}", "APPLIED" if row["applied"] else "NOT_APPLIED")
+        return
+
+    if args.account_status:
+        try:
+            exchange = _fetch_exchange_only(config)
+        except (RuntimeError, ValueError) as exc:
+            print(f"ACCOUNT STATUS: BLOCKED — {exc}")
+            raise SystemExit(2) from exc
+        print("HYPERLIQUID ACCOUNT")
+        print(f"network:          {config.normalized_network}")
+        print(f"mode:             {exchange.account_mode}")
+        print(f"account value:    ${exchange.account_value_usd:,.2f}")
+        print(f"value source:     {exchange.account_value_source}")
+        print(f"gross notional:   ${exchange.total_notional_usd:,.2f}")
+        print(f"position margin:  ${exchange.total_margin_used_usd:,.2f}")
+        if exchange.current_margin_ratio is not None:
+            print(f"current margin ratio: {exchange.current_margin_ratio:.2%}")
+        print(f"open positions:   {len(exchange.positions)}")
+        for ticker, position in sorted(exchange.positions.items()):
+            print(f"  {ticker:<8} qty {position.quantity:>14.8f}  value ${position.value_usd:>12,.2f}")
         return
 
     ledger = SizingLedger(config.sqlite_path)

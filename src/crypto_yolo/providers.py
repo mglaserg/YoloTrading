@@ -223,21 +223,123 @@ class HyperliquidReadOnlyClient:
     def query_order_status_by_cloid(self, cloid: str) -> Any:
         return self._post_info({"type": "orderStatus", "user": self.user_address, "oid": cloid})
 
+    def fetch_account_mode(self) -> str:
+        payload = self._post_info({"type": "userAbstraction", "user": self.user_address})
+        if payload is None:
+            return "default"
+        if isinstance(payload, str):
+            return payload
+        raise ValueError(f"unexpected Hyperliquid userAbstraction response: {payload!r}")
+
+    def fetch_spot_state(self) -> Any:
+        return self._post_info({"type": "spotClearinghouseState", "user": self.user_address})
+
+    @staticmethod
+    def _spot_balance(state: Any, coin: str) -> tuple[float, float]:
+        if not isinstance(state, dict):
+            raise ValueError("unexpected Hyperliquid spotClearinghouseState response")
+        wanted = coin.upper()
+        for balance in state.get("balances", []):
+            if not isinstance(balance, dict):
+                continue
+            if str(balance.get("coin", "")).upper() == wanted:
+                total = _as_float(balance.get("total", 0), f"{wanted}.total")
+                hold = _as_float(balance.get("hold", 0), f"{wanted}.hold")
+                return total, hold
+        return 0.0, 0.0
+
+    @staticmethod
+    def _position_stats(state: Any) -> tuple[float, float, float]:
+        """Return gross notional, position margin used, and isolated margin used."""
+        if not isinstance(state, dict):
+            raise ValueError("unexpected Hyperliquid clearinghouseState response")
+        gross_notional = 0.0
+        margin_used = 0.0
+        isolated_margin = 0.0
+        for asset_position in state.get("assetPositions", []):
+            if not isinstance(asset_position, dict):
+                continue
+            position = asset_position.get("position", {})
+            if not isinstance(position, dict):
+                continue
+            gross_notional += abs(_as_float(position.get("positionValue", 0), "positionValue"))
+            row_margin = _as_float(position.get("marginUsed", 0), "marginUsed")
+            margin_used += row_margin
+            leverage = position.get("leverage", {})
+            if isinstance(leverage, dict) and leverage.get("type") == "isolated":
+                isolated_margin += row_margin
+        return gross_notional, margin_used, isolated_margin
+
     def fetch_account_snapshot(self) -> ExchangeSnapshot:
         pulled_at = _utcnow()
+        mode = self.fetch_account_mode()
+        if mode == "portfolioMargin":
+            raise ValueError(
+                "Hyperliquid portfolio-margin accounts are not supported by YOLO yet; "
+                "use Unified Account or Standard mode"
+            )
+        if mode not in {"unifiedAccount", "disabled", "default"}:
+            raise ValueError(f"unsupported Hyperliquid account abstraction mode: {mode!r}")
+
         state = self._post_info({"type": "clearinghouseState", "user": self.user_address})
         meta_ctx = self._post_info({"type": "metaAndAssetCtxs"})
         markets = self._parse_markets(meta_ctx)
         positions = self._parse_positions(state, markets)
         summary = state.get("marginSummary", {}) if isinstance(state, dict) else {}
+        perp_account_value = _as_float(summary.get("accountValue", 0), "accountValue")
+
+        # Hyperliquid explicitly documents spotClearinghouseState as the source of truth
+        # for trading balances under Unified Account.  For the rare `default` response,
+        # fall back to spot USDC only when the legacy perp summary is empty, avoiding
+        # double-counting funded Standard accounts.
+        use_unified_balance = mode == "unifiedAccount"
+        spot_state = None
+        usdc_total = 0.0
+        usdc_hold = 0.0
+        if use_unified_balance or mode == "default":
+            spot_state = self.fetch_spot_state()
+            usdc_total, usdc_hold = self._spot_balance(spot_state, "USDC")
+            if mode == "default" and perp_account_value <= 0 and usdc_total > 0:
+                use_unified_balance = True
+
+        if use_unified_balance:
+            gross_notional, margin_used, isolated_margin = self._position_stats(state)
+            cross_maintenance = _as_float(
+                state.get("crossMaintenanceMarginUsed", 0) if isinstance(state, dict) else 0,
+                "crossMaintenanceMarginUsed",
+            )
+            available_for_cross = usdc_total - isolated_margin
+            current_margin_ratio = (
+                cross_maintenance / available_for_cross if available_for_cross > 0 else None
+            )
+            # `hold` is reserved spot balance.  Subtracting current position margin is a
+            # conservative operational estimate of immediately free USDC; the risk gate
+            # itself uses full account equity and its own projected-margin calculation.
+            withdrawable = max(usdc_total - usdc_hold - margin_used, 0.0)
+            return ExchangeSnapshot(
+                pulled_at_utc=pulled_at,
+                account_value_usd=usdc_total,
+                total_notional_usd=gross_notional,
+                total_margin_used_usd=margin_used,
+                withdrawable_usd=withdrawable,
+                positions=positions,
+                markets=markets,
+                account_mode="unifiedAccount",
+                account_value_source="spotClearinghouseState.USDC.total",
+                current_margin_ratio=current_margin_ratio,
+            )
+
         return ExchangeSnapshot(
             pulled_at_utc=pulled_at,
-            account_value_usd=_as_float(summary.get("accountValue", 0), "accountValue"),
+            account_value_usd=perp_account_value,
             total_notional_usd=_as_float(summary.get("totalNtlPos", 0), "totalNtlPos"),
             total_margin_used_usd=_as_float(summary.get("totalMarginUsed", 0), "totalMarginUsed"),
             withdrawable_usd=_as_float(state.get("withdrawable", 0), "withdrawable"),
             positions=positions,
             markets=markets,
+            account_mode="disabled" if mode == "default" else mode,
+            account_value_source="clearinghouseState.marginSummary.accountValue",
+            current_margin_ratio=None,
         )
 
     @staticmethod

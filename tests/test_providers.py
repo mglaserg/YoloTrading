@@ -67,3 +67,117 @@ class HyperliquidBboTests(unittest.TestCase):
         self.assertEqual(calls[0]["endTime"], 200)
         c.fetch_portfolio_history()
         self.assertEqual(calls[1]["type"], "portfolio")
+
+class HyperliquidUnifiedAccountTests(unittest.TestCase):
+    META = [
+        {"universe": [{"name": "BTC", "szDecimals": 5}]},
+        [{"markPx": "100000"}],
+    ]
+
+    def test_unified_account_uses_spot_usdc_as_account_value(self):
+        class Client(HyperliquidReadOnlyClient):
+            def _post_info(self, body):
+                typ = body["type"]
+                if typ == "userAbstraction":
+                    return "unifiedAccount"
+                if typ == "spotClearinghouseState":
+                    return {"balances": [{"coin": "USDC", "token": 0, "hold": "0", "total": "975.00"}]}
+                if typ == "clearinghouseState":
+                    return {
+                        "assetPositions": [],
+                        "crossMaintenanceMarginUsed": "0",
+                        "marginSummary": {"accountValue": "0", "totalNtlPos": "0", "totalMarginUsed": "0"},
+                        "withdrawable": "0",
+                    }
+                if typ == "metaAndAssetCtxs":
+                    return HyperliquidUnifiedAccountTests.META
+                raise AssertionError(body)
+
+        snap = Client("0xuser").fetch_account_snapshot()
+        self.assertEqual(snap.account_mode, "unifiedAccount")
+        self.assertEqual(snap.account_value_source, "spotClearinghouseState.USDC.total")
+        self.assertAlmostEqual(snap.account_value_usd, 975.0)
+        self.assertAlmostEqual(snap.total_notional_usd, 0.0)
+        self.assertAlmostEqual(snap.total_margin_used_usd, 0.0)
+
+    def test_unified_account_keeps_perp_positions_but_not_zero_perp_equity(self):
+        class Client(HyperliquidReadOnlyClient):
+            def _post_info(self, body):
+                typ = body["type"]
+                if typ == "userAbstraction":
+                    return "unifiedAccount"
+                if typ == "spotClearinghouseState":
+                    return {"balances": [{"coin": "USDC", "token": 0, "hold": "10", "total": "1000"}]}
+                if typ == "clearinghouseState":
+                    return {
+                        "assetPositions": [{
+                            "position": {
+                                "coin": "BTC", "szi": "0.001", "positionValue": "100",
+                                "marginUsed": "10", "leverage": {"type": "cross", "value": 10},
+                            }
+                        }],
+                        "crossMaintenanceMarginUsed": "5",
+                        "marginSummary": {"accountValue": "0", "totalNtlPos": "0", "totalMarginUsed": "0"},
+                        "withdrawable": "0",
+                    }
+                if typ == "metaAndAssetCtxs":
+                    return HyperliquidUnifiedAccountTests.META
+                raise AssertionError(body)
+
+        snap = Client("0xuser").fetch_account_snapshot()
+        self.assertAlmostEqual(snap.account_value_usd, 1000.0)
+        self.assertAlmostEqual(snap.total_notional_usd, 100.0)
+        self.assertAlmostEqual(snap.total_margin_used_usd, 10.0)
+        self.assertAlmostEqual(snap.positions["BTC"].quantity, 0.001)
+        self.assertAlmostEqual(snap.current_margin_ratio, 0.005)
+        self.assertAlmostEqual(snap.withdrawable_usd, 980.0)
+
+    def test_standard_account_remains_perp_summary_authoritative(self):
+        calls = []
+        class Client(HyperliquidReadOnlyClient):
+            def _post_info(self, body):
+                calls.append(body["type"])
+                typ = body["type"]
+                if typ == "userAbstraction":
+                    return "disabled"
+                if typ == "clearinghouseState":
+                    return {
+                        "assetPositions": [],
+                        "marginSummary": {"accountValue": "1234", "totalNtlPos": "200", "totalMarginUsed": "20"},
+                        "withdrawable": "1214",
+                    }
+                if typ == "metaAndAssetCtxs":
+                    return HyperliquidUnifiedAccountTests.META
+                raise AssertionError(body)
+
+        snap = Client("0xuser").fetch_account_snapshot()
+        self.assertEqual(snap.account_mode, "disabled")
+        self.assertAlmostEqual(snap.account_value_usd, 1234.0)
+        self.assertNotIn("spotClearinghouseState", calls)
+
+    def test_default_zero_perp_summary_falls_back_to_spot_usdc(self):
+        class Client(HyperliquidReadOnlyClient):
+            def _post_info(self, body):
+                typ = body["type"]
+                if typ == "userAbstraction":
+                    return "default"
+                if typ == "spotClearinghouseState":
+                    return {"balances": [{"coin": "USDC", "total": "975", "hold": "0"}]}
+                if typ == "clearinghouseState":
+                    return {"assetPositions": [], "marginSummary": {"accountValue": "0", "totalNtlPos": "0", "totalMarginUsed": "0"}, "withdrawable": "0"}
+                if typ == "metaAndAssetCtxs":
+                    return HyperliquidUnifiedAccountTests.META
+                raise AssertionError(body)
+
+        snap = Client("0xuser").fetch_account_snapshot()
+        self.assertEqual(snap.account_mode, "unifiedAccount")
+        self.assertAlmostEqual(snap.account_value_usd, 975.0)
+
+    def test_portfolio_margin_fails_closed(self):
+        class Client(HyperliquidReadOnlyClient):
+            def _post_info(self, body):
+                if body["type"] == "userAbstraction":
+                    return "portfolioMargin"
+                raise AssertionError("should fail before account reads")
+        with self.assertRaisesRegex(ValueError, "portfolio-margin"):
+            Client("0xuser").fetch_account_snapshot()

@@ -49,6 +49,9 @@ class ExchangeSnapshot:
     withdrawable_usd: float
     positions: dict[str, Position]
     markets: dict[str, MarketSpec]
+    account_mode: str = "disabled"
+    account_value_source: str = "perp_margin_summary"
+    current_margin_ratio: float | None = None
 
     @property
     def mark_prices(self) -> dict[str, float]:
