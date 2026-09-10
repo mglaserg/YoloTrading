@@ -18,6 +18,11 @@ class ConfigModeTests(unittest.TestCase):
         self.assertEqual(cfg.normalized_execution_mode, "plan")
         self.assertIn("api.hyperliquid.xyz", cfg.hyperliquid_api_url)
 
+    def test_direction_mode_normalization(self):
+        self.assertEqual(YoloConfig(direction_mode="LONG_ONLY").normalized_direction_mode, "long_only")
+        with self.assertRaises(ValueError):
+            _ = YoloConfig(direction_mode="sometimes_short").normalized_direction_mode
+
 
 if __name__ == "__main__":
     unittest.main()

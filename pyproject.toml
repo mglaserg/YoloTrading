@@ -1,7 +1,7 @@
 [project]
 name = "crypto-yolo-trading"
-version = "0.5.3"
-description = "Crypto YOLO pre-live trade planning, audit, and Hyperliquid execution staging"
+version = "0.6.0"
+description = "Crypto YOLO live Hyperliquid execution, audit, and restart-safe reconciliation"
 requires-python = ">=3.11"
 
 [project.scripts]

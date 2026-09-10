@@ -1,5 +1,5 @@
 [Unit]
-Description=Crypto YOLO daily pre-live planner
+Description=Crypto YOLO daily rebalance
 [Service]
 Type=oneshot
 WorkingDirectory=@REPO_DIR@

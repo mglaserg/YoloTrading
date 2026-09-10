@@ -130,6 +130,8 @@ class OrderIntent:
     target_weight: float
     current_weight: float
     destination_weight: float
+    current_quantity: float = 0.0
+    destination_quantity: float = 0.0
     status: str = "planned"
 
     @property

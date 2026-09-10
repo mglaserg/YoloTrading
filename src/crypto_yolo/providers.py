@@ -223,6 +223,20 @@ class HyperliquidReadOnlyClient:
     def query_order_status_by_cloid(self, cloid: str) -> Any:
         return self._post_info({"type": "orderStatus", "user": self.user_address, "oid": cloid})
 
+    def fetch_user_fills_by_time(self, start_time_ms: int, end_time_ms: int | None = None) -> Any:
+        body: dict[str, Any] = {
+            "type": "userFillsByTime",
+            "user": self.user_address,
+            "startTime": int(start_time_ms),
+            "aggregateByTime": False,
+        }
+        if end_time_ms is not None:
+            body["endTime"] = int(end_time_ms)
+        return self._post_info(body)
+
+    def fetch_user_role(self, address: str) -> Any:
+        return self._post_info({"type": "userRole", "user": address})
+
     def fetch_account_mode(self) -> str:
         payload = self._post_info({"type": "userAbstraction", "user": self.user_address})
         if payload is None:

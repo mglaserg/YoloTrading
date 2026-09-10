@@ -47,6 +47,12 @@ class YoloConfig:
     hl_subaccount_address: str = ""
     network: str = "testnet"
     execution_mode: str = "plan"
+    direction_mode: str = "long_short"
+    live_trading_enabled: bool = False
+    hl_api_wallet_private_key: str = ""
+    execution_max_reprices: int = 2
+    execution_reprice_seconds: float = 5.0
+    execution_deadman_seconds: int = 300
     auto_sync_cash_flows: bool = True
     cashflow_lookback_days: int = 7
     min_order_usd: float = 10.0
@@ -73,6 +79,15 @@ class YoloConfig:
         if value in {"plan", "execute"}:
             return value
         raise ValueError(f"unknown YOLO_EXECUTION_MODE={self.execution_mode!r}; use plan or execute")
+
+    @property
+    def normalized_direction_mode(self) -> str:
+        value = self.direction_mode.strip().lower()
+        if value in {"long_short", "long_only"}:
+            return value
+        raise ValueError(
+            f"unknown YOLO_DIRECTION_MODE={self.direction_mode!r}; use long_short or long_only"
+        )
 
     @property
     def hyperliquid_api_url(self) -> str:
@@ -121,6 +136,12 @@ class YoloConfig:
             hl_subaccount_address=os.getenv("HL_YOLO_SUBACCOUNT_ADDRESS", ""),
             network=network,
             execution_mode=execution_mode,
+            direction_mode=os.getenv("YOLO_DIRECTION_MODE", "long_short"),
+            live_trading_enabled=_b("YOLO_LIVE_TRADING_ENABLED", False),
+            hl_api_wallet_private_key=os.getenv("HL_API_WALLET_PRIVATE_KEY", ""),
+            execution_max_reprices=_i("YOLO_EXECUTION_MAX_REPRICES", 2),
+            execution_reprice_seconds=_f("YOLO_EXECUTION_REPRICE_SECONDS", 5.0),
+            execution_deadman_seconds=_i("YOLO_EXECUTION_DEADMAN_SECONDS", 300),
             auto_sync_cash_flows=_b("YOLO_AUTO_SYNC_CASH_FLOWS", True),
             cashflow_lookback_days=_i("YOLO_CASHFLOW_LOOKBACK_DAYS", 7),
             min_order_usd=_f("YOLO_MIN_ORDER_USD", 10.0),

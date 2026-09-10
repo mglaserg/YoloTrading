@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.vendor/
 .env
 *.log
 state/

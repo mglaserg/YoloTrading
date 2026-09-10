@@ -68,6 +68,27 @@ class HyperliquidBboTests(unittest.TestCase):
         c.fetch_portfolio_history()
         self.assertEqual(calls[1]["type"], "portfolio")
 
+    def test_execution_read_request_shapes(self):
+        calls = []
+        class Client(HyperliquidReadOnlyClient):
+            def _post_info(self, body):
+                calls.append(body)
+                return []
+        c = Client("0xMASTER")
+        c.fetch_user_fills_by_time(100, 200)
+        self.assertEqual(calls[0], {
+            "type": "userFillsByTime",
+            "user": "0xMASTER",
+            "startTime": 100,
+            "aggregateByTime": False,
+            "endTime": 200,
+        })
+        c.fetch_user_role("0xAGENT")
+        self.assertEqual(calls[1], {"type": "userRole", "user": "0xAGENT"})
+        c.query_order_status_by_cloid("0x" + "11" * 16)
+        self.assertEqual(calls[2]["type"], "orderStatus")
+        self.assertEqual(calls[2]["oid"], "0x" + "11" * 16)
+
 class HyperliquidUnifiedAccountTests(unittest.TestCase):
     META = [
         {"universe": [{"name": "BTC", "szDecimals": 5}]},

@@ -10,6 +10,13 @@ from .archive import SignalArchive
 from .cashflows import CashFlowLedger, CashFlowSyncError, CashFlowSyncResult
 from .config import YoloConfig
 from .env import load_env_file
+from .execution import (
+    HyperliquidSdkExecutionClient,
+    LiveDependencyError,
+    LiveExecutionError,
+    execute_run,
+    validate_api_wallet,
+)
 from .health import HealthCheck, HealthSummary, print_health
 from .live import fetch_live_inputs, wait_for_live_inputs
 from .models import Position, SignalRow
@@ -39,6 +46,37 @@ def _hl_client(config: YoloConfig) -> HyperliquidReadOnlyClient:
 
 def _fetch_exchange_only(config: YoloConfig):
     return _hl_client(config).fetch_account_snapshot()
+
+
+def _execution_client(config: YoloConfig) -> HyperliquidSdkExecutionClient:
+    return HyperliquidSdkExecutionClient(
+        private_key=config.hl_api_wallet_private_key,
+        account_address=config.hl_account_address,
+        subaccount_address=config.hl_subaccount_address,
+        api_url=config.hyperliquid_api_url,
+        timeout_seconds=config.request_timeout_seconds,
+    )
+
+
+def _require_live_execution_ready(config: YoloConfig):
+    if not config.live_trading_enabled:
+        raise LiveExecutionError(
+            "YOLO_LIVE_TRADING_ENABLED is false; live order transmission remains interlocked"
+        )
+    if config.execution_max_reprices < 0:
+        raise LiveExecutionError("YOLO_EXECUTION_MAX_REPRICES cannot be negative")
+    if config.execution_reprice_seconds < 0:
+        raise LiveExecutionError("YOLO_EXECUTION_REPRICE_SECONDS cannot be negative")
+    if config.execution_deadman_seconds < 5:
+        raise LiveExecutionError("YOLO_EXECUTION_DEADMAN_SECONDS must be at least 5 seconds")
+    read_client = _hl_client(config)
+    execution_client = _execution_client(config)
+    validate_api_wallet(
+        read_client=read_client,
+        execution_client=execution_client,
+        master_account_address=config.hl_account_address,
+    )
+    return read_client, execution_client
 
 
 def _print_sizing(sizing: SizingDecision) -> None:
@@ -115,6 +153,27 @@ def _print_intents(intents) -> None:
         )
 
 
+def _print_execution_result(result) -> None:
+    print("\nLIVE EXECUTION")
+    print(f"run id:          {result.run_id}")
+    print(f"status:          {result.status.upper()}")
+    for item in result.intents:
+        avg = "-" if item.average_fill_price is None else f"{item.average_fill_price:.8g}"
+        tca = "-" if item.realized_tca_bps is None else f"{item.realized_tca_bps:+.2f}bp"
+        print(
+            f"{item.ticker:<8} {item.status:<8} filled {item.filled_quantity:.8f}/"
+            f"{item.requested_quantity:.8f} avg {avg} fee ${item.fee_usd:.4f} "
+            f"TCA {tca} attempts {item.attempts}"
+        )
+    print(f"post-trade check: {'PASS' if result.postcheck_ok else 'FAIL'}")
+    for row in result.postcheck:
+        if not row["ok"]:
+            print(
+                f"- {row['ticker']}: ${row['error_usd']:.2f} position error "
+                f"(tolerance ${row['tolerance_usd']:.2f})"
+            )
+
+
 def _require_compound_subaccount(config: YoloConfig) -> None:
     if config.require_dedicated_subaccount_for_compound and not config.hl_subaccount_address:
         raise SizingError(
@@ -139,7 +198,7 @@ def _cashflow_sync(config, ledger, exchange, client) -> CashFlowSyncResult | Non
     )
 
 
-def _persist_and_print_prelive(*, config, live, sizing, targets, plan, risk, cashflow_result) -> None:
+def _persist_and_print_prelive(*, config, live, sizing, targets, plan, risk, cashflow_result):
     archive = SignalArchive(config.sqlite_path)
     fingerprint = archive.snapshot_fingerprint(live.signal_snapshot_id)
     prelive = PreLiveLedger(config.sqlite_path)
@@ -185,6 +244,21 @@ def _persist_and_print_prelive(*, config, live, sizing, targets, plan, risk, cas
         else:
             cashflow_detail = "no new external cash flows"
 
+    execute_selected = config.normalized_execution_mode == "execute"
+    idempotency_ok = (not execution_locked) or not execute_selected
+    execution_interlock_ok = (
+        True if not execute_selected else (config.live_trading_enabled and bool(config.hl_api_wallet_private_key))
+    )
+    execution_detail = (
+        "PLAN — signed orders will not be sent"
+        if not execute_selected
+        else (
+            "LIVE enabled; API-wallet credential present"
+            if execution_interlock_ok
+            else "execute selected but live enable/key is missing"
+        )
+    )
+
     checks = (
         HealthCheck("RW signals", True, f"current for {live.signal_date.isoformat()}"),
         HealthCheck("Signal archive", True, f"snapshot {live.signal_snapshot_id} persisted"),
@@ -196,10 +270,11 @@ def _persist_and_print_prelive(*, config, live, sizing, targets, plan, risk, cas
         ),
         HealthCheck("Cash-flow ledger", cashflow_ok, cashflow_detail),
         HealthCheck("Sizing", True, f"{sizing.mode}; effective nominal ${sizing.effective_nominal_usd:,.2f}"),
+        HealthCheck("Direction mode", True, config.normalized_direction_mode),
         HealthCheck("Risk gate", risk.approved, "approved" if risk.approved else "; ".join(risk.reasons)),
         HealthCheck("ALO construction", risk.approved, f"{len(intents)} would-submit intent(s)" if risk.approved else "not built because risk gate failed"),
-        HealthCheck("Idempotency", not execution_locked, "no execution lock for this signal date" if not execution_locked else "signal date already execution-locked"),
-        HealthCheck("Execution interlock", config.normalized_execution_mode == "plan", "order transmission is disabled in v0.5"),
+        HealthCheck("Idempotency", idempotency_ok, "no execution lock for this signal date" if not execution_locked else "signal date already execution-locked"),
+        HealthCheck("Execution interlock", execution_interlock_ok, execution_detail),
     )
     health = HealthSummary(checks)
     persisted = prelive.persist_run(
@@ -217,30 +292,40 @@ def _persist_and_print_prelive(*, config, live, sizing, targets, plan, risk, cas
         total_margin_used_usd=live.exchange.total_margin_used_usd,
         health_status=health.status,
         intents=intents,
+        direction_mode=config.normalized_direction_mode,
+        plan=plan,
     )
     archive.mark_snapshot_planned(live.signal_snapshot_id)
     _print_plan(targets, plan, risk, signal_date=live.signal_date.isoformat(), exchange=live.exchange, sizing=sizing)
     _print_intents(intents)
     print_health(health)
-    print(f"\nPRE-LIVE RUN: {persisted.run_id}  {persisted.run_key[:12]}...")
+    print(f"\nYOLO RUN: {persisted.run_id}  {persisted.run_key[:12]}...")
     print(f"NETWORK: {config.normalized_network.upper()}")
-    print("EXECUTION: PLAN ONLY — signed order transmission does not exist in v0.5")
+    print(f"DIRECTION: {config.normalized_direction_mode.upper()}")
+    print(
+        "EXECUTION: PLAN ONLY"
+        if not execute_selected
+        else "EXECUTION: LIVE TRANSMISSION SELECTED"
+    )
     if not health.ok:
         raise SystemExit(2)
+    return persisted, intents, health
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Preview a Crypto YOLO rebalance")
+    parser = argparse.ArgumentParser(description="Run, inspect, or execute a Crypto YOLO rebalance")
     parser.add_argument("--fixture", type=Path, default=Path("examples/sample_snapshot.json"))
-    parser.add_argument("--live-data", action="store_true", help="Pull real RW + Hyperliquid read-only data and build pre-live ALO intents")
-    parser.add_argument("--wait-for-signal", action="store_true", help="Linux/daemon mode: poll RW until today's signal is current, then run one pre-live plan")
+    parser.add_argument("--live-data", action="store_true", help="Pull real RW + Hyperliquid data, build ALO intents, and execute only when explicitly enabled")
+    parser.add_argument("--wait-for-signal", action="store_true", help="Linux/daemon mode: poll RW until today's signal is current, then run one configured rebalance")
     parser.add_argument("--expected-date", type=date.fromisoformat, default=None)
     parser.add_argument("--buffer-mode", choices=["edge", "target"], default=None)
     parser.add_argument("--archive-status", action="store_true", help="Show the most recent archived RW pulls")
-    parser.add_argument("--health-status", action="store_true", help="Show the latest persisted pre-live health/run summary")
+    parser.add_argument("--health-status", action="store_true", help="Show the latest persisted health/run summary")
     parser.add_argument("--cashflow-status", action="store_true", help="Show recent detected Hyperliquid cash-flow ledger events")
     parser.add_argument("--sizing-status", action="store_true", help="Show current unitized compounding state using live Hyperliquid equity")
     parser.add_argument("--account-status", action="store_true", help="Read Hyperliquid account mode, equity source, margin, and open positions only")
+    parser.add_argument("--execution-status", action="store_true", help="Check live-execution configuration, SDK, API-wallet authorization, and latest execution session without sending orders")
+    parser.add_argument("--resume-execution", type=int, default=None, metavar="RUN_ID", help="Resume/reconcile a previously execution-locked run by run id")
     parser.add_argument("--record-flow", type=float, default=None, metavar="USD", help="Manual emergency/admin cash-flow entry (+deposit, -withdrawal)")
     parser.add_argument("--rebase-compounding", action="store_true", help="Reset compounding baseline to current YOLO subaccount equity")
     args = parser.parse_args()
@@ -253,12 +338,42 @@ def main() -> None:
     try:
         _ = config.normalized_network
         mode = config.normalized_execution_mode
+        _ = config.normalized_direction_mode
     except ValueError as exc:
         print(f"CONFIG: BLOCKED — {exc}")
         raise SystemExit(2) from exc
-    if mode == "execute":
-        print("EXECUTION: BLOCKED — v0.5 intentionally contains no signed order-submission path. Set YOLO_EXECUTION_MODE=plan.")
-        raise SystemExit(2)
+
+    if args.execution_status:
+        print("YOLO EXECUTION STATUS")
+        print(f"network:           {config.normalized_network}")
+        print(f"execution mode:    {config.normalized_execution_mode}")
+        print(f"direction mode:    {config.normalized_direction_mode}")
+        print(f"live enabled:      {config.live_trading_enabled}")
+        print(f"API key present:   {bool(config.hl_api_wallet_private_key)}")
+        print(f"max reprices:      {config.execution_max_reprices}")
+        print(f"reprice wait:      {config.execution_reprice_seconds:g}s")
+        print(f"dead-man timeout:  {config.execution_deadman_seconds}s")
+        if config.hl_api_wallet_private_key:
+            try:
+                read_client = _hl_client(config)
+                execution_client = _execution_client(config)
+                role = validate_api_wallet(
+                    read_client=read_client,
+                    execution_client=execution_client,
+                    master_account_address=config.hl_account_address,
+                )
+                print(f"API wallet:        {execution_client.signer_address}")
+                print(f"wallet role:       {role.get('role')} — AUTHORIZED")
+            except (LiveExecutionError, LiveDependencyError, RuntimeError, ValueError) as exc:
+                print(f"wallet readiness:  BLOCKED — {exc}")
+        else:
+            print("wallet readiness:  NOT CONFIGURED")
+        latest = PreLiveLedger(config.sqlite_path).latest_run()
+        if latest is not None:
+            session = PreLiveLedger(config.sqlite_path).execution_session(int(latest["id"]))
+            print(f"latest run:        {latest['id']} ({latest['signal_date']})")
+            print(f"latest execution:  {session['status'] if session else 'never transmitted'}")
+        return
 
     if args.archive_status:
         for row in SignalArchive(config.sqlite_path).recent_pulls():
@@ -268,7 +383,7 @@ def main() -> None:
     if args.health_status:
         row = PreLiveLedger(config.sqlite_path).latest_run()
         if row is None:
-            print("YOLO HEALTH: no persisted pre-live runs yet")
+            print("YOLO HEALTH: no persisted runs yet")
             return
         print(f"YOLO HEALTH: {row['health_status']}")
         print(f"run id:            {row['id']}")
@@ -276,11 +391,15 @@ def main() -> None:
         print(f"signal date:       {row['signal_date']}")
         print(f"network:           {row['network']}")
         print(f"execution mode:    {row['execution_mode']}")
+        print(f"direction mode:    {row.get('direction_mode', 'long_short')}")
         print(f"effective nominal: ${row['effective_nominal_usd']:,.2f}")
         print(f"account value:     ${row['account_value_usd']:,.2f}")
         print(f"risk approved:     {bool(row['risk_approved'])}")
         print(f"order intents:     {row['intent_count']}")
         print(f"transmitted:       {bool(row['transmitted'])}")
+        session = PreLiveLedger(config.sqlite_path).execution_session(int(row["id"]))
+        if session is not None:
+            print(f"execution status:  {session['status']}")
         return
 
     if args.cashflow_status:
@@ -309,6 +428,28 @@ def main() -> None:
         print(f"open positions:   {len(exchange.positions)}")
         for ticker, position in sorted(exchange.positions.items()):
             print(f"  {ticker:<8} qty {position.quantity:>14.8f}  value ${position.value_usd:>12,.2f}")
+        return
+
+    if args.resume_execution is not None:
+        if mode != "execute":
+            print("EXECUTION RESUME: BLOCKED — set YOLO_EXECUTION_MODE=execute first")
+            raise SystemExit(2)
+        try:
+            read_client, execution_client = _require_live_execution_ready(config)
+            prelive = PreLiveLedger(config.sqlite_path)
+            result = execute_run(
+                run_id=args.resume_execution,
+                config=config,
+                read_client=read_client,
+                execution_client=execution_client,
+                ledger=prelive,
+                archive=SignalArchive(config.sqlite_path),
+                require_existing_session=True,
+            )
+        except (LiveExecutionError, LiveDependencyError, RuntimeError, ValueError) as exc:
+            print(f"EXECUTION RESUME: BLOCKED — {exc}")
+            raise SystemExit(2) from exc
+        _print_execution_result(result)
         return
 
     ledger = SizingLedger(config.sqlite_path)
@@ -342,7 +483,7 @@ def main() -> None:
             raise SystemExit(2) from exc
         kind = "DEPOSIT" if args.record_flow > 0 else "WITHDRAWAL"
         print(f"{kind} RECORDED: ${abs(args.record_flow):,.2f}")
-        print("Manual flow entry remains an admin fallback; normal pre-live runs auto-sync recognized Hyperliquid ledger flows.")
+        print("Manual flow entry remains an admin fallback; normal runs auto-sync recognized Hyperliquid ledger flows.")
         return
 
     if args.sizing_status:
@@ -364,12 +505,20 @@ def main() -> None:
         return
 
     if args.live_data or args.wait_for_signal:
+        execution_client = None
+        validated_read_client = None
+        if mode == "execute":
+            try:
+                validated_read_client, execution_client = _require_live_execution_ready(config)
+            except (LiveExecutionError, LiveDependencyError, RuntimeError, ValueError) as exc:
+                print(f"LIVE EXECUTION: BLOCKED — {exc}")
+                raise SystemExit(2) from exc
         try:
             if args.wait_for_signal:
                 live = wait_for_live_inputs(config, expected_date=args.expected_date)
             else:
                 live = fetch_live_inputs(config, expected_date=args.expected_date)
-            client = _hl_client(config)
+            client = validated_read_client or _hl_client(config)
             cashflow_result = _cashflow_sync(config, ledger, live.exchange, client)
             sizing = ledger.decision(account_value_usd=live.exchange.account_value_usd, config=config)
         except (SignalValidationError, SizingError, CashFlowSyncError, RuntimeError, ValueError) as exc:
@@ -386,7 +535,7 @@ def main() -> None:
             size_decimals={ticker: spec.size_decimals for ticker, spec in live.exchange.markets.items()},
         )
         risk = summarize_post_trade(plan, effective_config, account_collateral_usd=live.exchange.account_value_usd)
-        _persist_and_print_prelive(
+        persisted, _, _ = _persist_and_print_prelive(
             config=effective_config,
             live=live,
             sizing=sizing,
@@ -395,6 +544,21 @@ def main() -> None:
             risk=risk,
             cashflow_result=cashflow_result,
         )
+        if mode == "execute":
+            try:
+                result = execute_run(
+                    run_id=persisted.run_id,
+                    config=effective_config,
+                    read_client=client,
+                    execution_client=execution_client,
+                    ledger=PreLiveLedger(effective_config.sqlite_path),
+                    archive=SignalArchive(effective_config.sqlite_path),
+                )
+            except (LiveExecutionError, RuntimeError, ValueError) as exc:
+                print(f"LIVE EXECUTION: ATTENTION — {exc}")
+                print(f"Resume after inspection with: ./bin/yolo --resume-execution {persisted.run_id}")
+                raise SystemExit(2) from exc
+            _print_execution_result(result)
         return
 
     signals, positions = _load_fixture(args.fixture)

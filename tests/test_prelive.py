@@ -40,6 +40,50 @@ class PreLiveTests(unittest.TestCase):
         self.assertEqual(intents[1].limit_price, 2001.0)
         self.assertEqual(intents[0].tif, "Alo")
 
+    def test_position_reduction_is_reduce_only_even_inside_universe(self):
+        now = datetime.now(timezone.utc)
+        reducing = TradePlanRow(
+            ticker="BTC", price=10000, target_weight=0.05, current_weight=0.1,
+            target_quantity=0.5, current_quantity=1.0, trade_quantity=-0.5,
+            trade_value_usd=-5000, post_trade_weight=0.05,
+            within_buffer_before=False, within_buffer_after=True,
+            arrival_price=9900, is_universe_exit=False,
+        )
+        intent = build_alo_intents(
+            plan=[reducing], quotes={"BTC": BboQuote("BTC", 9990, 10010, now)},
+            run_key="reduce", account_address="0xyolo", min_order_usd=10,
+        )[0]
+        self.assertTrue(intent.reduce_only)
+        self.assertEqual(intent.destination_quantity, 0.5)
+
+    def test_sign_flip_is_split_into_reduce_only_close_then_open(self):
+        now = datetime.now(timezone.utc)
+        flip = TradePlanRow(
+            ticker="BTC", price=10000, target_weight=0.1, current_weight=-0.05,
+            target_quantity=0.1, current_quantity=-0.05, trade_quantity=0.15,
+            trade_value_usd=1500, post_trade_weight=0.1,
+            within_buffer_before=False, within_buffer_after=True,
+            arrival_price=9900, is_universe_exit=False,
+        )
+        intents = build_alo_intents(
+            plan=[flip], quotes={"BTC": BboQuote("BTC", 9990, 10010, now)},
+            run_key="flip", account_address="0xyolo", min_order_usd=10,
+        )
+        self.assertEqual(len(intents), 2)
+        close, open_ = intents
+        self.assertEqual(close.side, "BUY")
+        self.assertTrue(close.reduce_only)
+        self.assertAlmostEqual(close.quantity, 0.05)
+        self.assertAlmostEqual(close.destination_quantity, 0.0)
+        self.assertFalse(open_.reduce_only)
+        self.assertAlmostEqual(open_.quantity, 0.1)
+        self.assertAlmostEqual(open_.current_quantity, 0.0)
+        self.assertNotEqual(close.cloid, open_.cloid)
+        self.assertNotEqual(
+            PreLiveLedger.make_reprice_cloid(base_cloid=close.cloid, attempt=1),
+            PreLiveLedger.make_reprice_cloid(base_cloid=open_.cloid, attempt=1),
+        )
+
     def test_persist_run_is_idempotent_for_same_run_key(self):
         with tempfile.TemporaryDirectory() as td:
             ledger = PreLiveLedger(Path(td) / "yolo.sqlite")
@@ -59,6 +103,37 @@ class PreLiveTests(unittest.TestCase):
             second = ledger.persist_run(**kwargs)
             self.assertEqual(first.run_id, second.run_id)
             self.assertEqual(second.intent_count, 1)
+
+
+    def test_untransmitted_same_run_refreshes_preview_bbo(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger = PreLiveLedger(Path(td) / "yolo.sqlite")
+            now = datetime.now(timezone.utc)
+            plan = [row()]
+            first_intents = build_alo_intents(
+                plan=plan, quotes={"BTC": BboQuote("BTC", 9990, 10010, now)},
+                run_key="same", account_address="0xyolo", min_order_usd=10,
+            )
+            kwargs = dict(
+                run_key="same", signal_date="2026-09-10", signal_snapshot_id=1,
+                signal_fingerprint="fp", network="mainnet", execution_mode="plan",
+                account_address="0xyolo", effective_nominal_usd=50_000,
+                risk_approved=True, risk_reasons=(), account_value_usd=20_000,
+                total_margin_used_usd=1000, health_status="PRE-LIVE READY",
+                direction_mode="long_short", plan=plan,
+            )
+            first = ledger.persist_run(intents=first_intents, **kwargs)
+            self.assertEqual(ledger.intents_for_run(first.run_id)[0]["limit_price"], 9990.0)
+
+            fresh_intents = build_alo_intents(
+                plan=plan, quotes={"BTC": BboQuote("BTC", 9997, 10003, now)},
+                run_key="same", account_address="0xyolo", min_order_usd=10,
+            )
+            second = ledger.persist_run(intents=fresh_intents, **kwargs)
+            self.assertEqual(first.run_id, second.run_id)
+            refreshed = ledger.intents_for_run(first.run_id)
+            self.assertEqual(len(refreshed), 1)
+            self.assertEqual(refreshed[0]["limit_price"], 9997.0)
 
     def test_execution_lock_is_separate_from_plan(self):
         with tempfile.TemporaryDirectory() as td:

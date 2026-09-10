@@ -28,6 +28,10 @@ def build_targets(signals: list[SignalRow], config: YoloConfig) -> list[TargetRo
 
         vol_scaled = 0.0 if s.ewvol == 0 else raw / s.ewvol
         vol_scaled = _clip(vol_scaled, -config.max_asset_weight, config.max_asset_weight)
+        if config.normalized_direction_mode == "long_only":
+            # Long-only is an operationally useful constrained variant, not a
+            # rescaled "always invested" portfolio. Negative signals become cash.
+            vol_scaled = max(vol_scaled, 0.0)
         intermediate.append((s, raw, vol_scaled))
 
     gross = sum(abs(v) for _, _, v in intermediate)

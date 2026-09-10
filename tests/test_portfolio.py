@@ -22,6 +22,22 @@ class PortfolioTests(unittest.TestCase):
         self.assertAlmostEqual(sum(abs(t.final_weight) for t in targets), 1.0)
         self.assertTrue(all(abs(t.final_weight) <= 0.25 for t in targets))
 
+    def test_long_only_zeros_negative_weights_without_rescaling_cash(self):
+        cfg = YoloConfig(
+            nominal_usd=1000,
+            direction_mode="long_only",
+            max_asset_weight=0.25,
+            max_gross_weight=1.0,
+        )
+        rows = [
+            SignalRow("BTC", 100.0, 0.03, 0.03, 0.03, 0.10),
+            SignalRow("ETH", 100.0, -0.03, -0.03, -0.03, 0.10),
+        ]
+        targets = build_targets(rows, cfg)
+        self.assertAlmostEqual(targets[0].final_weight, 0.25)
+        self.assertAlmostEqual(targets[1].final_weight, 0.0)
+        self.assertAlmostEqual(sum(t.final_weight for t in targets), 0.25)
+
 
 if __name__ == "__main__":
     unittest.main()
