@@ -2,6 +2,12 @@
 
 Crypto YOLO is a daily **Momentum + Trend + Carry** crypto portfolio implemented against Robot Wealth signals and Hyperliquid execution. The production portfolio uses Robot Wealth-supplied `ewvol`, inverse-volatility sizing, a 2% trade buffer, compounding-aware nominal sizing, persistent point-in-time signal archives, and fail-closed execution controls.
 
+## v0.6.1: low-volume dead-man compatibility
+
+v0.6.1 keeps the v0.6 live-execution architecture and adds a narrow compatibility path for Hyperliquid accounts that are not yet eligible for `scheduleCancel`. The dead-man remains required by default; supervised canary runs may explicitly waive only Hyperliquid's specific "enough volume traded" rejection. All unrelated dead-man errors remain fail-closed.
+
+It also releases the execution reservation if dead-man arming fails before an execution session starts, and can safely resume a v0.6 run stranded at that exact pre-transmission point.
+
 ## v0.6: guarded live execution
 
 v0.6 crosses the final execution boundary while keeping the safe defaults unchanged:
@@ -220,7 +226,16 @@ Before live transmission YOLO schedules Hyperliquid's native cancel-all dead-man
 
 ```text
 YOLO_EXECUTION_DEADMAN_SECONDS=300
+YOLO_DEADMAN_REQUIRED=true
 ```
+
+For a **supervised first canary only**, a new/low-volume Hyperliquid account may return `Cannot set scheduled cancel time until enough volume traded`. In that specific case you may set:
+
+```text
+YOLO_DEADMAN_REQUIRED=false
+```
+
+YOLO still attempts to arm the dead-man. It proceeds without it only when Hyperliquid returns that exact volume-eligibility class of error, prints a prominent warning before transmitting, and continues to fail closed for authentication, network, parameter, or any other scheduled-cancel failure. Without the dead-man, a process crash can leave a resting ALO order live, so keep the systemd timer stopped and supervise the canary. Restore `true` as soon as Hyperliquid accepts the scheduled cancel.
 
 ### Restart/resume
 
@@ -234,7 +249,7 @@ Resume an attention run with:
 ./bin/yolo --resume-execution RUN_ID
 ```
 
-A run from a prior UTC signal date cannot be resumed into live execution. `--resume-execution` also refuses a run that never actually entered an execution session; use a fresh `--live-data` run instead.
+A run from a prior UTC signal date cannot be resumed into live execution. `--resume-execution` normally refuses a run that never entered an execution session. The sole compatibility exception is a v0.6-style run that already holds its own execution reservation but failed before transmission while arming the dead-man; v0.6.1 may resume that same run, using fresh BBOs before any order.
 
 ## Lubuntu setup
 

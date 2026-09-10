@@ -140,6 +140,26 @@ def _is_bad_alo_error(error: str | None) -> bool:
     return "alo" in text or "post only" in text or "post-only" in text
 
 
+def _deadman_insufficient_volume(value: Any) -> bool:
+    """Recognize Hyperliquid's account-volume gate for scheduled cancels only.
+
+    This intentionally does not match arbitrary schedule-cancel failures. The
+    opt-out is narrowly scoped to the exchange's explicit "enough volume
+    traded" rejection so network/auth/parameter failures remain fail-closed.
+    """
+    if isinstance(value, BaseException):
+        text = str(value)
+    elif isinstance(value, dict):
+        text = repr(value)
+    else:
+        text = str(value)
+    normalized = " ".join(text.lower().split())
+    return (
+        "scheduled cancel" in normalized
+        and "enough volume traded" in normalized
+    )
+
+
 class HyperliquidSdkExecutionClient:
     """Thin signed-order adapter around Hyperliquid's official Python SDK.
 
@@ -405,6 +425,7 @@ def execute_run(
     sleep_fn: Callable[[float], None] = time.sleep,
     time_ms_fn: Callable[[], int] = lambda: int(time.time() * 1000),
     require_existing_session: bool = False,
+    warning_fn: Callable[[str], None] = print,
 ) -> LiveRunResult:
     run = ledger.run_by_id(run_id)
     if run is None:
@@ -426,7 +447,17 @@ def execute_run(
         )
 
     session = ledger.execution_session(run_id)
-    if require_existing_session and session is None:
+    existing_lock = ledger.get_execution_lock(
+        signal_date=str(run["signal_date"]),
+        network=config.normalized_network,
+        account_address=config.hyperliquid_user_address,
+    )
+    legacy_presession_lock = (
+        session is None
+        and existing_lock is not None
+        and int(existing_lock.get("run_id", -1)) == int(run_id)
+    )
+    if require_existing_session and session is None and not legacy_presession_lock:
         raise LiveExecutionError(
             "refusing --resume-execution for a run that never entered live execution; "
             "run a fresh --live-data instead"
@@ -447,11 +478,44 @@ def execute_run(
     deadman_time = None
     deadman_armed = False
     if intents:
-        deadman_time = now_ms + max(5, int(config.execution_deadman_seconds)) * 1000
-        response = execution_client.schedule_cancel(deadman_time)
-        if not isinstance(response, dict) or str(response.get("status", "")).lower() != "ok":
-            raise LiveExecutionError(f"failed to arm Hyperliquid dead-man switch: {response!r}")
-        deadman_armed = True
+        requested_deadman_time = now_ms + max(5, int(config.execution_deadman_seconds)) * 1000
+        try:
+            response = execution_client.schedule_cancel(requested_deadman_time)
+        except Exception as exc:
+            if not config.deadman_required and _deadman_insufficient_volume(exc):
+                warning_fn(
+                    "WARNING: Hyperliquid dead-man switch is unavailable because this account "
+                    "has not traded enough volume. Proceeding only because YOLO_DEADMAN_REQUIRED=false. "
+                    "Supervise this run: resting ALO orders will not be exchange-auto-cancelled if YOLO dies."
+                )
+            else:
+                if session is None:
+                    ledger.release_execution(
+                        signal_date=str(run["signal_date"]),
+                        network=config.normalized_network,
+                        account_address=config.hyperliquid_user_address,
+                        run_id=run_id,
+                    )
+                raise LiveExecutionError(f"failed to arm Hyperliquid dead-man switch: {exc}") from exc
+        else:
+            if isinstance(response, dict) and str(response.get("status", "")).lower() == "ok":
+                deadman_time = requested_deadman_time
+                deadman_armed = True
+            elif not config.deadman_required and _deadman_insufficient_volume(response):
+                warning_fn(
+                    "WARNING: Hyperliquid dead-man switch is unavailable because this account "
+                    "has not traded enough volume. Proceeding only because YOLO_DEADMAN_REQUIRED=false. "
+                    "Supervise this run: resting ALO orders will not be exchange-auto-cancelled if YOLO dies."
+                )
+            else:
+                if session is None:
+                    ledger.release_execution(
+                        signal_date=str(run["signal_date"]),
+                        network=config.normalized_network,
+                        account_address=config.hyperliquid_user_address,
+                        run_id=run_id,
+                    )
+                raise LiveExecutionError(f"failed to arm Hyperliquid dead-man switch: {response!r}")
     ledger.start_execution_session(run_id=run_id, started_at_ms=start_ms, deadman_time_ms=deadman_time)
 
     results: list[IntentExecutionResult] = []

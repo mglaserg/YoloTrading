@@ -1,5 +1,5 @@
 Metadata-Version: 2.4
 Name: crypto-yolo-trading
-Version: 0.6.0
+Version: 0.6.1
 Summary: Crypto YOLO live Hyperliquid execution, audit, and restart-safe reconciliation
 Requires-Python: >=3.11

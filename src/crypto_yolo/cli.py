@@ -353,6 +353,7 @@ def main() -> None:
         print(f"max reprices:      {config.execution_max_reprices}")
         print(f"reprice wait:      {config.execution_reprice_seconds:g}s")
         print(f"dead-man timeout:  {config.execution_deadman_seconds}s")
+        print(f"dead-man required: {config.deadman_required}")
         if config.hl_api_wallet_private_key:
             try:
                 read_client = _hl_client(config)

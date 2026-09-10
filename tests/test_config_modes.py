@@ -18,6 +18,12 @@ class ConfigModeTests(unittest.TestCase):
         self.assertEqual(cfg.normalized_execution_mode, "plan")
         self.assertIn("api.hyperliquid.xyz", cfg.hyperliquid_api_url)
 
+    def test_deadman_required_defaults_true_and_can_be_disabled(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertTrue(YoloConfig.from_env().deadman_required)
+        with patch.dict("os.environ", {"YOLO_DEADMAN_REQUIRED": "false"}, clear=True):
+            self.assertFalse(YoloConfig.from_env().deadman_required)
+
     def test_direction_mode_normalization(self):
         self.assertEqual(YoloConfig(direction_mode="LONG_ONLY").normalized_direction_mode, "long_only")
         with self.assertRaises(ValueError):

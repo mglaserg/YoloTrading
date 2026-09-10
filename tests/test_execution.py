@@ -138,6 +138,21 @@ class FakeExec:
         return {"status": "ok", "response": {"type": "cancel", "data": {"statuses": ["success"]}}}
 
 
+class FakeDeadmanExec(FakeExec):
+    def __init__(self, read, responses, deadman_response=None, deadman_exception=None):
+        super().__init__(read, responses)
+        self.deadman_response = deadman_response
+        self.deadman_exception = deadman_exception
+
+    def schedule_cancel(self, time_ms=None):
+        self.deadman.append(time_ms)
+        if time_ms is not None and self.deadman_exception is not None:
+            raise self.deadman_exception
+        if time_ms is not None and self.deadman_response is not None:
+            return self.deadman_response
+        return {"status": "ok", "response": {"type": "default"}}
+
+
 class FakeExecFillLag(FakeExec):
     def place_alo(self, **kwargs):
         self.placed.append(kwargs)
@@ -428,6 +443,117 @@ class ExecutionTests(unittest.TestCase):
             self.assertIsNone(ledger.get_execution_lock(
                 signal_date="2026-09-10", network="mainnet", account_address="0xmaster"
             ))
+
+    def test_deadman_volume_gate_is_required_by_default_and_releases_presession_lock(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger, run_id = self._persist(Path(td) / "yolo.sqlite")
+            read = FakeRead()
+            exe = FakeDeadmanExec(
+                read,
+                [filled(801)],
+                deadman_response={
+                    "status": "err",
+                    "response": "Cannot set scheduled cancel time until enough volume traded",
+                },
+            )
+            cfg = YoloConfig(
+                nominal_usd=10_000, network="mainnet", execution_mode="execute",
+                direction_mode="long_short", hl_account_address="0xmaster", min_order_usd=10,
+            )
+            with self.assertRaisesRegex(LiveExecutionError, "failed to arm Hyperliquid dead-man switch"):
+                execute_run(
+                    run_id=run_id, config=cfg, read_client=read, execution_client=exe,
+                    ledger=ledger, archive=FakeArchive(), sleep_fn=lambda _: None,
+                    time_ms_fn=lambda: 1789045260000,
+                )
+            self.assertEqual(exe.placed, [])
+            self.assertIsNone(ledger.execution_session(run_id))
+            self.assertIsNone(ledger.get_execution_lock(
+                signal_date="2026-09-10", network="mainnet", account_address="0xmaster"
+            ))
+
+    def test_deadman_volume_gate_can_be_explicitly_waived_for_supervised_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger, run_id = self._persist(Path(td) / "yolo.sqlite")
+            read = FakeRead(final_qty=0.1)
+            exe = FakeDeadmanExec(
+                read,
+                [filled(802)],
+                deadman_response={
+                    "status": "err",
+                    "response": "Cannot set scheduled cancel time until enough volume traded",
+                },
+            )
+            warnings = []
+            cfg = YoloConfig(
+                nominal_usd=10_000, network="mainnet", execution_mode="execute",
+                direction_mode="long_short", hl_account_address="0xmaster", min_order_usd=10,
+                deadman_required=False, execution_reprice_seconds=0, execution_max_reprices=0,
+            )
+            result = execute_run(
+                run_id=run_id, config=cfg, read_client=read, execution_client=exe,
+                ledger=ledger, archive=FakeArchive(), sleep_fn=lambda _: None,
+                time_ms_fn=lambda: 1789045260000, warning_fn=warnings.append,
+            )
+            self.assertEqual(result.status, "complete")
+            self.assertEqual(len(exe.placed), 1)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("YOLO_DEADMAN_REQUIRED=false", warnings[0])
+            # We attempted to arm it, but because it never armed there is no
+            # schedule_cancel(None) cleanup call.
+            self.assertEqual(len(exe.deadman), 1)
+            self.assertIsNotNone(exe.deadman[0])
+            self.assertIsNone(ledger.execution_session(run_id)["deadman_time_ms"])
+
+    def test_deadman_opt_out_does_not_ignore_unrelated_failures(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger, run_id = self._persist(Path(td) / "yolo.sqlite")
+            read = FakeRead()
+            exe = FakeDeadmanExec(
+                read,
+                [filled(803)],
+                deadman_response={"status": "err", "response": "invalid signature"},
+            )
+            cfg = YoloConfig(
+                nominal_usd=10_000, network="mainnet", execution_mode="execute",
+                direction_mode="long_short", hl_account_address="0xmaster", min_order_usd=10,
+                deadman_required=False,
+            )
+            with self.assertRaisesRegex(LiveExecutionError, "invalid signature"):
+                execute_run(
+                    run_id=run_id, config=cfg, read_client=read, execution_client=exe,
+                    ledger=ledger, archive=FakeArchive(), sleep_fn=lambda _: None,
+                    time_ms_fn=lambda: 1789045260000, warning_fn=lambda _: None,
+                )
+            self.assertEqual(exe.placed, [])
+
+    def test_v06_presession_lock_can_be_resumed_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger, run_id = self._persist(Path(td) / "yolo.sqlite")
+            ledger.reserve_execution(
+                signal_date="2026-09-10", network="mainnet", account_address="0xmaster", run_id=run_id
+            )
+            read = FakeRead(final_qty=0.1)
+            exe = FakeDeadmanExec(
+                read,
+                [filled(804)],
+                deadman_response={
+                    "status": "err",
+                    "response": "Cannot set scheduled cancel time until enough volume traded",
+                },
+            )
+            cfg = YoloConfig(
+                nominal_usd=10_000, network="mainnet", execution_mode="execute",
+                direction_mode="long_short", hl_account_address="0xmaster", min_order_usd=10,
+                deadman_required=False, execution_reprice_seconds=0, execution_max_reprices=0,
+            )
+            result = execute_run(
+                run_id=run_id, config=cfg, read_client=read, execution_client=exe,
+                ledger=ledger, archive=FakeArchive(), sleep_fn=lambda _: None,
+                time_ms_fn=lambda: 1789045260000, require_existing_session=True, warning_fn=lambda _: None,
+            )
+            self.assertEqual(result.status, "complete")
+            self.assertEqual(len(exe.placed), 1)
 
     def test_api_wallet_must_be_agent_for_master(self):
         read = FakeRead()

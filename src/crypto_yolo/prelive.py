@@ -402,6 +402,19 @@ class PreLiveLedger:
             ).fetchone()
         return None if row is None else dict(row)
 
+    def release_execution(self, *, signal_date: str, network: str, account_address: str, run_id: int) -> bool:
+        """Release only this run's execution reservation.
+
+        Used for failures that occur before an execution session exists and before
+        any order can be transmitted. A different run's lock is never removed.
+        """
+        with self._db() as conn:
+            cur = conn.execute(
+                "DELETE FROM execution_locks WHERE signal_date=? AND network=? AND account_address=? AND run_id=?",
+                (signal_date, network, account_address.lower(), int(run_id)),
+            )
+            return cur.rowcount > 0
+
     def latest_run(self) -> dict | None:
         with self._db() as conn:
             row = conn.execute("SELECT * FROM rebalance_runs ORDER BY id DESC LIMIT 1").fetchone()
