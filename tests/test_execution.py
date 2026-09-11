@@ -306,6 +306,176 @@ class ExecutionTests(unittest.TestCase):
             self.assertIsNone(exe.deadman[-1])
             self.assertEqual(ledger.execution_session(run_id)["status"], "complete")
 
+    def test_subminimum_exact_close_is_sent_and_verified_not_marked_dust(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "yolo.sqlite"
+            ledger = PreLiveLedger(db_path)
+            exit_row = TradePlanRow(
+                ticker="BTC",
+                price=10_000.0,
+                target_weight=0.0,
+                current_weight=0.0005,
+                target_quantity=0.0,
+                current_quantity=0.0005,
+                trade_quantity=-0.0005,
+                trade_value_usd=-5.0,
+                post_trade_weight=0.0,
+                within_buffer_before=False,
+                within_buffer_after=True,
+                arrival_price=None,
+                is_universe_exit=True,
+            )
+            intents = build_alo_intents(
+                plan=[exit_row],
+                quotes={"BTC": BboQuote("BTC", 9990.0, 10010.0, NOW)},
+                run_key="small-exit",
+                account_address="0xmaster",
+                min_order_usd=10,
+            )
+            self.assertEqual(len(intents), 1)
+            persisted = ledger.persist_run(
+                run_key="small-exit",
+                signal_date="2026-09-10",
+                signal_snapshot_id=7,
+                signal_fingerprint="fp",
+                network="mainnet",
+                execution_mode="execute",
+                account_address="0xmaster",
+                effective_nominal_usd=10_000,
+                risk_approved=True,
+                risk_reasons=(),
+                account_value_usd=2000,
+                total_margin_used_usd=0,
+                health_status="PRE-LIVE READY",
+                intents=intents,
+                direction_mode="long_only",
+                plan=[exit_row],
+            )
+
+            class SmallExitRead(FakeRead):
+                def fetch_account_snapshot(self):
+                    self.snapshot_calls += 1
+                    positions = (
+                        {}
+                        if abs(self.position_qty) < 1e-18
+                        else {"BTC": Position("BTC", self.position_qty, 10_000.0)}
+                    )
+                    return ExchangeSnapshot(
+                        pulled_at_utc=NOW,
+                        account_value_usd=2000.0,
+                        total_notional_usd=abs(self.position_qty) * 10_000,
+                        total_margin_used_usd=0.0,
+                        withdrawable_usd=2000.0,
+                        positions=positions,
+                        markets={"BTC": MarketSpec("BTC", 10_000.0, 4)},
+                        account_mode="unifiedAccount",
+                        account_value_source="spot",
+                    )
+
+            read = SmallExitRead()
+            read.position_qty = 0.0005
+            exe = FakeExec(read, [filled(300, qty="0.0005", px="10005")])
+            cfg = YoloConfig(
+                nominal_usd=10_000,
+                network="mainnet",
+                execution_mode="execute",
+                direction_mode="long_only",
+                hl_account_address="0xmaster",
+                min_order_usd=10,
+                execution_reprice_seconds=0,
+                execution_max_reprices=0,
+                execution_deadman_seconds=60,
+            )
+            result = execute_run(
+                run_id=persisted.run_id,
+                config=cfg,
+                read_client=read,
+                execution_client=exe,
+                ledger=ledger,
+                archive=FakeArchive(),
+                sleep_fn=lambda _: None,
+                time_ms_fn=lambda: 1789045260000,
+            )
+            self.assertEqual(result.status, "complete")
+            self.assertEqual(result.intents[0].status, "filled")
+            self.assertEqual(len(exe.placed), 1)
+            self.assertTrue(exe.placed[0]["reduce_only"])
+            self.assertAlmostEqual(exe.placed[0]["quantity"], 0.0005)
+
+    def test_live_execution_refuses_configuration_that_can_strand_universe_exits(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger, run_id = self._persist(Path(td) / "yolo.sqlite")
+            read = FakeRead(final_qty=0.1)
+            exe = FakeExec(read, [filled(301)])
+            cfg = YoloConfig(
+                nominal_usd=10_000,
+                network="mainnet",
+                execution_mode="execute",
+                direction_mode="long_short",
+                hl_account_address="0xmaster",
+                close_non_universe_positions=False,
+            )
+            with self.assertRaisesRegex(
+                LiveExecutionError, "YOLO_CLOSE_NON_UNIVERSE_POSITIONS=true"
+            ):
+                execute_run(
+                    run_id=run_id,
+                    config=cfg,
+                    read_client=read,
+                    execution_client=exe,
+                    ledger=ledger,
+                    archive=FakeArchive(),
+                    sleep_fn=lambda _: None,
+                    time_ms_fn=lambda: 1789045260000,
+                )
+            self.assertEqual(exe.placed, [])
+
+    def test_live_execution_blocks_if_persisted_run_omits_an_open_position(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger, run_id = self._persist(Path(td) / "yolo.sqlite")
+
+            class OrphanRead(FakeRead):
+                def fetch_account_snapshot(self):
+                    base = snapshot(self.position_qty)
+                    positions = dict(base.positions)
+                    positions["DOGE"] = Position("DOGE", 100.0, 0.20)
+                    markets = dict(base.markets)
+                    markets["DOGE"] = MarketSpec("DOGE", 0.20, 0)
+                    return ExchangeSnapshot(
+                        pulled_at_utc=base.pulled_at_utc,
+                        account_value_usd=base.account_value_usd,
+                        total_notional_usd=base.total_notional_usd + 20.0,
+                        total_margin_used_usd=base.total_margin_used_usd,
+                        withdrawable_usd=base.withdrawable_usd,
+                        positions=positions,
+                        markets=markets,
+                        account_mode=base.account_mode,
+                        account_value_source=base.account_value_source,
+                    )
+
+            read = OrphanRead(final_qty=0.1)
+            exe = FakeExec(read, [filled(302)])
+            cfg = YoloConfig(
+                nominal_usd=10_000,
+                network="mainnet",
+                execution_mode="execute",
+                direction_mode="long_short",
+                hl_account_address="0xmaster",
+                close_non_universe_positions=True,
+            )
+            with self.assertRaisesRegex(LiveExecutionError, "DOGE"):
+                execute_run(
+                    run_id=run_id,
+                    config=cfg,
+                    read_client=read,
+                    execution_client=exe,
+                    ledger=ledger,
+                    archive=FakeArchive(),
+                    sleep_fn=lambda _: None,
+                    time_ms_fn=lambda: 1789045260000,
+                )
+            self.assertEqual(exe.placed, [])
+
     def test_bad_alo_reprices_with_new_cloid(self):
         with tempfile.TemporaryDirectory() as td:
             ledger, run_id = self._persist(Path(td) / "yolo.sqlite")

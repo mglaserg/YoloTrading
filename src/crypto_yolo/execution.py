@@ -306,6 +306,11 @@ def _quantity_tolerance(size_decimals: int | None) -> float:
     return max(1e-12, 10 ** (-int(size_decimals)) * 0.51)
 
 
+def _is_exact_close_intent(intent: dict) -> bool:
+    """True when this reduce-only intent is supposed to flatten the position."""
+    return bool(intent.get("reduce_only")) and abs(float(intent.get("destination_quantity") or 0.0)) <= 1e-18
+
+
 def _terminal_confirmed_fill(state: OrderStatusOutcome) -> float:
     status = state.status.lower()
     if status == "open":
@@ -415,7 +420,10 @@ def _assert_position_matches_ledger(
     price = market.mark_price if market is not None else (position.price if position is not None else 0.0)
     size_decimals = None if market is None else market.size_decimals
     tolerance = _quantity_tolerance(size_decimals)
-    if price > 0:
+    # For ordinary rebalances, sub-minimum notional differences are operational
+    # dust.  For an exact close, however, a leftover position is precisely the
+    # risk we are trying to remove, so verify to exchange lot precision instead.
+    if price > 0 and not _is_exact_close_intent(intent):
         tolerance = max(tolerance, float(min_order_usd) / price)
     if abs(actual - expected) > tolerance + 1e-12:
         raise LiveExecutionError(
@@ -435,7 +443,13 @@ def _postcheck(*, ledger: PreLiveLedger, run_id: int, snapshot: Any, min_order_u
         market = snapshot.markets.get(ticker)
         price = market.mark_price if market is not None else (position.price if position is not None else 0.0)
         lot_qty = 10 ** (-market.size_decimals) if market is not None else 0.0
-        tolerance_usd = max(float(min_order_usd), lot_qty * price * 1.01)
+        # A zero destination means YOLO intended to flatten the position.  Do
+        # not let the generic $10 dust tolerance certify a stranded universe-exit
+        # holding as successful; require it to be gone to lot-size precision.
+        if abs(wanted_qty) <= 1e-18:
+            tolerance_usd = lot_qty * price * 1.01
+        else:
+            tolerance_usd = max(float(min_order_usd), lot_qty * price * 1.01)
         error_usd = abs(actual_qty - wanted_qty) * price if price > 0 else math.inf
         ok = error_usd <= tolerance_usd + 1e-9
         all_ok = all_ok and ok
@@ -476,6 +490,11 @@ def execute_run(
         raise LiveExecutionError("run account does not match the current Hyperliquid trading account")
     if str(run.get("direction_mode") or "long_short") != config.normalized_direction_mode:
         raise LiveExecutionError("run direction mode does not match current YOLO_DIRECTION_MODE")
+    if not config.close_non_universe_positions:
+        raise LiveExecutionError(
+            "live execution requires YOLO_CLOSE_NON_UNIVERSE_POSITIONS=true; "
+            "refusing a mode that can strand positions after they leave the RW universe"
+        )
 
     now_ms = time_ms_fn()
     current_utc_date = datetime.fromtimestamp(now_ms / 1000.0, tz=timezone.utc).date().isoformat()
@@ -513,6 +532,14 @@ def execute_run(
     start_ms = int(session["started_at_ms"]) if session is not None else now_ms
     intents = ledger.intents_for_run(run_id)
     market_snapshot = read_client.fetch_account_snapshot()
+    run_target_tickers = {str(row["ticker"]) for row in ledger.targets_for_run(run_id)}
+    orphan_tickers = sorted(set(market_snapshot.positions) - run_target_tickers)
+    if orphan_tickers:
+        raise LiveExecutionError(
+            "live positions are absent from this persisted run target set: "
+            + ", ".join(orphan_tickers)
+            + "; rebuild with a fresh --live-data so YOLO can create explicit reduce-only exits"
+        )
     deadman_time = None
     deadman_armed = False
     if intents:
@@ -679,7 +706,8 @@ def execute_run(
                         limit_price=limit_price,
                     )
 
-                if remaining * float(limit_price) < config.min_order_usd:
+                exact_close = _is_exact_close_intent(intent)
+                if remaining * float(limit_price) < config.min_order_usd and not exact_close:
                     if existing is not None:
                         ledger.update_attempt(
                             int(existing["id"]), status="dust", completed=True
@@ -782,7 +810,7 @@ def execute_run(
                 reference_price = float(intent["limit_price"])
                 if remaining <= qty_tolerance:
                     final_status = "filled"
-                elif remaining * reference_price < config.min_order_usd:
+                elif remaining * reference_price < config.min_order_usd and not _is_exact_close_intent(intent):
                     final_status = "dust"
                 else:
                     final_status = "unfilled"

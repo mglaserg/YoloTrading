@@ -407,6 +407,7 @@ YOLO_BUFFER_MODE=edge
 YOLO_MAX_ASSET_WEIGHT=0.25
 YOLO_MAX_GROSS_WEIGHT=1.0
 YOLO_MAX_MARGIN_UTILIZATION=0.60
+YOLO_CLOSE_NON_UNIVERSE_POSITIONS=true
 YOLO_MIN_ORDER_USD=10
 
 YOLO_EXECUTION_MAX_REPRICES=2
@@ -417,6 +418,12 @@ YOLO_EXECUTION_CANCEL_POLL_SECONDS=0.5
 ```
 
 `YOLO_ACCOUNT_COLLATERAL_USD` is retained for fixture/offline risk calculations. Real live runs pass the actual Hyperliquid account equity into the risk gate.
+
+Live execution requires `YOLO_CLOSE_NON_UNIVERSE_POSITIONS=true`. A position that is
+still held after its token disappears from the Robot Wealth universe is an explicit
+target-to-zero, reduce-only exit. Full closes are not silently discarded merely
+because the remaining notional has fallen below `YOLO_MIN_ORDER_USD`; YOLO attempts
+the exact close and verifies the position to exchange lot precision.
 
 ## Tests
 

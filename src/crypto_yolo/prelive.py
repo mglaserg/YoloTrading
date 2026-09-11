@@ -631,6 +631,17 @@ def build_alo_intents(
 ) -> list[OrderIntent]:
     intents: list[OrderIntent] = []
 
+    def is_exact_close(*, reduce_only: bool, destination_quantity: float) -> bool:
+        """Return True when the intent is intended to flatten the position.
+
+        Hyperliquid's ordinary minimum-notional rule must not make YOLO silently
+        abandon a position that has left the signal universe.  Exact reduce-only
+        closes are therefore carried all the way to the exchange; if Hyperliquid
+        refuses one, live execution fails visibly instead of treating the holding
+        as harmless dust.
+        """
+        return bool(reduce_only) and abs(float(destination_quantity)) <= 1e-18
+
     def append_intent(
         *,
         row: TradePlanRow,
@@ -651,7 +662,11 @@ def build_alo_intents(
         limit_px = quote.bid_price if side == "BUY" else quote.ask_price
         if limit_px <= 0:
             raise ValueError(f"invalid BBO limit price for {row.ticker}")
-        if quantity * limit_px < max(0.0, min_order_usd):
+        exact_close = is_exact_close(
+            reduce_only=reduce_only,
+            destination_quantity=destination_quantity,
+        )
+        if quantity * limit_px < max(0.0, min_order_usd) and not exact_close:
             return
         cloid = PreLiveLedger.make_cloid(
             run_key=run_key,
@@ -681,9 +696,15 @@ def build_alo_intents(
         )
 
     for row in plan:
-        if abs(row.trade_value_usd) < max(0.0, min_order_usd) or abs(row.trade_quantity) < 1e-18:
+        if abs(row.trade_quantity) < 1e-18:
             continue
         destination_quantity = row.current_quantity + row.trade_quantity
+        exact_close_row = (
+            abs(destination_quantity) <= 1e-18
+            and abs(row.current_quantity) > 1e-18
+        )
+        if abs(row.trade_value_usd) < max(0.0, min_order_usd) and not exact_close_row:
+            continue
 
         # Crossing zero is deliberately two-stage. The close leg is reduce-only;
         # only after it is filled/dust does the executor move to the opening leg.

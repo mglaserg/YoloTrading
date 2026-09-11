@@ -142,7 +142,7 @@ def _print_plan(targets, plan, risk, *, signal_date=None, exchange=None, sizing=
 def _print_intents(intents) -> None:
     print("\nALO ORDER PREVIEW")
     if not intents:
-        print("No orders above minimum notional are required.")
+        print("No executable orders are required.")
         return
     print("ticker side       qty        limit_px   notional    TIF  reduce  proposed_TCA  cloid")
     for i in intents:
@@ -211,9 +211,20 @@ def _persist_and_print_prelive(*, config, live, sizing, targets, plan, risk, cas
         network=config.normalized_network,
         plan=plan,
     )
+    # Full closes are never silently discarded as generic sub-minimum "dust".
+    # This is especially important when a token leaves the RW universe: the
+    # position may have fallen below YOLO_MIN_ORDER_USD by the time it needs to
+    # be flattened, but it still represents live risk that YOLO owns.
     trade_rows = [
         p for p in plan
-        if abs(p.trade_value_usd) >= config.min_order_usd and abs(p.trade_quantity) > 1e-18
+        if abs(p.trade_quantity) > 1e-18
+        and (
+            abs(p.trade_value_usd) >= config.min_order_usd
+            or (
+                abs(p.current_quantity) > 1e-18
+                and abs(p.current_quantity + p.trade_quantity) <= 1e-18
+            )
+        )
     ]
     quotes = {}
     if risk.approved:

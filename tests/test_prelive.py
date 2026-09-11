@@ -56,6 +56,24 @@ class PreLiveTests(unittest.TestCase):
         self.assertTrue(intent.reduce_only)
         self.assertEqual(intent.destination_quantity, 0.5)
 
+    def test_subminimum_universe_exit_is_not_silently_dropped(self):
+        now = datetime.now(timezone.utc)
+        exit_row = TradePlanRow(
+            ticker="DOGE", price=5.0, target_weight=0.0, current_weight=0.00005,
+            target_quantity=0.0, current_quantity=1.0, trade_quantity=-1.0,
+            trade_value_usd=-5.0, post_trade_weight=0.0,
+            within_buffer_before=False, within_buffer_after=True,
+            arrival_price=None, is_universe_exit=True,
+        )
+        intents = build_alo_intents(
+            plan=[exit_row], quotes={"DOGE": BboQuote("DOGE", 4.99, 5.01, now)},
+            run_key="exit-dust", account_address="0xyolo", min_order_usd=10,
+        )
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0].side, "SELL")
+        self.assertTrue(intents[0].reduce_only)
+        self.assertEqual(intents[0].destination_quantity, 0.0)
+
     def test_sign_flip_is_split_into_reduce_only_close_then_open(self):
         now = datetime.now(timezone.utc)
         flip = TradePlanRow(
