@@ -6,6 +6,7 @@ import unittest
 from crypto_yolo.config import YoloConfig
 from crypto_yolo.execution import (
     LiveExecutionError,
+    _wait_for_terminal_order_status,
     execute_run,
     parse_order_response,
     validate_api_wallet,
@@ -185,6 +186,28 @@ def rejected(message):
     return {"status": "ok", "response": {"type": "order", "data": {"statuses": [{"error": message}]}}}
 
 
+class SequencedStatusRead:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.calls = 0
+
+    def query_order_status_by_cloid(self, cloid):
+        self.calls += 1
+        if len(self.payloads) > 1:
+            return self.payloads.pop(0)
+        return self.payloads[0]
+
+
+def order_status(status, *, oid=900, orig="0.1", remaining="0.1"):
+    return {
+        "status": "order",
+        "order": {
+            "status": status,
+            "order": {"oid": oid, "origSz": orig, "sz": remaining},
+        },
+    }
+
+
 class ExecutionTests(unittest.TestCase):
     def _persist(self, db_path):
         ledger = PreLiveLedger(db_path)
@@ -220,6 +243,31 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(parse_order_response(resting(1)).status, "open")
         self.assertEqual(parse_order_response(filled(2)).status, "filled")
         self.assertIn("nope", parse_order_response(rejected("nope")).error)
+
+    def test_cancel_confirmation_polls_through_temporary_open_status(self):
+        read = SequencedStatusRead([
+            order_status("open"),
+            order_status("open"),
+            order_status("canceled"),
+        ])
+        sleeps = []
+        payload, state = _wait_for_terminal_order_status(
+            read_client=read, cloid="0xabc", ticker="ZEC",
+            timeout_seconds=5.0, poll_seconds=0.5, sleep_fn=sleeps.append,
+        )
+        self.assertEqual(state.status, "canceled")
+        self.assertEqual(read.calls, 3)
+        self.assertEqual(sleeps, [0.5, 0.5])
+        self.assertEqual(payload["order"]["status"], "canceled")
+
+    def test_cancel_confirmation_stays_fail_closed_after_timeout(self):
+        read = SequencedStatusRead([order_status("open")])
+        with self.assertRaisesRegex(LiveExecutionError, "not confirmed terminal after 1s"):
+            _wait_for_terminal_order_status(
+                read_client=read, cloid="0xabc", ticker="ZEC",
+                timeout_seconds=1.0, poll_seconds=0.5, sleep_fn=lambda _: None,
+            )
+        self.assertEqual(read.calls, 3)
 
     def test_complete_live_run_persists_fill_tca_and_deadman(self):
         with tempfile.TemporaryDirectory() as td:

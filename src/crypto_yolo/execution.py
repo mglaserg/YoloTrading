@@ -320,6 +320,44 @@ def _terminal_confirmed_fill(state: OrderStatusOutcome) -> float:
     )
 
 
+def _wait_for_terminal_order_status(
+    *,
+    read_client: Any,
+    cloid: str,
+    ticker: str,
+    timeout_seconds: float,
+    poll_seconds: float,
+    sleep_fn: Callable[[float], None],
+) -> tuple[Any, OrderStatusOutcome]:
+    """Poll orderStatus until Hyperliquid confirms the CLOID is terminal.
+
+    A successful cancel response is not enough to safely reissue an order.  We
+    require orderStatus to leave ``open`` and remain fail-closed if the exchange
+    cannot resolve the CLOID within the bounded confirmation window.
+    """
+    timeout = max(0.0, float(timeout_seconds))
+    interval = max(0.05, float(poll_seconds))
+    max_polls = max(1, int(math.ceil(timeout / interval)) + 1)
+    last_payload: Any = None
+    last_state = OrderStatusOutcome("unknown")
+
+    for poll in range(max_polls):
+        last_payload = read_client.query_order_status_by_cloid(cloid)
+        last_state = _order_status(last_payload)
+        if not _is_missing_order_status(last_state.status) and last_state.status != "open":
+            return last_payload, last_state
+        if poll + 1 < max_polls:
+            sleep_fn(interval)
+
+    if _is_missing_order_status(last_state.status):
+        detail = f"last status was {last_state.status!r}"
+    else:
+        detail = "order is still open"
+    raise LiveExecutionError(
+        f"{ticker} CLOID {cloid} is not confirmed terminal after {timeout:g}s ({detail}); refusing any reissue"
+    )
+
+
 def _sync_fills_to_confirmed(
     *,
     ledger: PreLiveLedger,
@@ -556,13 +594,14 @@ def execute_run(
                         raise LiveExecutionError(
                             f"failed to cancel open {intent['ticker']} CLOID {existing['cloid']}: {cancel_response!r}"
                         )
-                    sleep_fn(0.25)
-                    status_payload = read_client.query_order_status_by_cloid(str(existing["cloid"]))
-                    state = _order_status(status_payload)
-                    if _is_missing_order_status(state.status) or state.status == "open":
-                        raise LiveExecutionError(
-                            f"{intent['ticker']} CLOID {existing['cloid']} is not confirmed canceled; dead-man remains the backstop"
-                        )
+                    status_payload, state = _wait_for_terminal_order_status(
+                        read_client=read_client,
+                        cloid=str(existing["cloid"]),
+                        ticker=str(intent["ticker"]),
+                        timeout_seconds=config.execution_cancel_confirm_seconds,
+                        poll_seconds=config.execution_cancel_poll_seconds,
+                        sleep_fn=sleep_fn,
+                    )
 
                 ledger.update_attempt(
                     int(existing["id"]),
@@ -708,13 +747,14 @@ def execute_run(
                             raise LiveExecutionError(
                                 f"failed to cancel open {intent['ticker']} CLOID {cloid}: {cancel_response!r}"
                             )
-                        sleep_fn(0.25)
-                        status_payload = read_client.query_order_status_by_cloid(cloid)
-                        state = _order_status(status_payload)
-                        if _is_missing_order_status(state.status) or state.status == "open":
-                            raise LiveExecutionError(
-                                f"{intent['ticker']} CLOID {cloid} is not confirmed canceled; refusing any reissue"
-                            )
+                        status_payload, state = _wait_for_terminal_order_status(
+                            read_client=read_client,
+                            cloid=cloid,
+                            ticker=str(intent["ticker"]),
+                            timeout_seconds=config.execution_cancel_confirm_seconds,
+                            poll_seconds=config.execution_cancel_poll_seconds,
+                            sleep_fn=sleep_fn,
+                        )
                     ledger.update_attempt(
                         int(attempt["id"]),
                         status=state.status,

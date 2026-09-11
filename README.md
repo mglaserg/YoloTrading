@@ -187,6 +187,7 @@ Normal execution is ALO/post-only:
 - SELL → current best ask
 - bounded `YOLO_EXECUTION_MAX_REPRICES`
 - wait `YOLO_EXECUTION_REPRICE_SECONDS` before cancel/reprice
+- after a cancel is accepted, poll `orderStatus` until terminal for up to `YOLO_EXECUTION_CANCEL_CONFIRM_SECONDS` (default 10s); never reissue while the old CLOID is still open or unresolved
 - no IOC/taker fallback in v0.6
 
 If the material remainder is still unfilled after the attempt budget, the run enters `attention`; it does not chase the market.
@@ -226,6 +227,8 @@ Before live transmission YOLO schedules Hyperliquid's native cancel-all dead-man
 
 ```text
 YOLO_EXECUTION_DEADMAN_SECONDS=300
+YOLO_EXECUTION_CANCEL_CONFIRM_SECONDS=10
+YOLO_EXECUTION_CANCEL_POLL_SECONDS=0.5
 YOLO_DEADMAN_REQUIRED=true
 ```
 
@@ -409,6 +412,8 @@ YOLO_MIN_ORDER_USD=10
 YOLO_EXECUTION_MAX_REPRICES=2
 YOLO_EXECUTION_REPRICE_SECONDS=5
 YOLO_EXECUTION_DEADMAN_SECONDS=300
+YOLO_EXECUTION_CANCEL_CONFIRM_SECONDS=10
+YOLO_EXECUTION_CANCEL_POLL_SECONDS=0.5
 ```
 
 `YOLO_ACCOUNT_COLLATERAL_USD` is retained for fixture/offline risk calculations. Real live runs pass the actual Hyperliquid account equity into the risk gate.

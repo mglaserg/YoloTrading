@@ -53,6 +53,8 @@ class YoloConfig:
     execution_max_reprices: int = 2
     execution_reprice_seconds: float = 5.0
     execution_deadman_seconds: int = 300
+    execution_cancel_confirm_seconds: float = 10.0
+    execution_cancel_poll_seconds: float = 0.5
     deadman_required: bool = True
     auto_sync_cash_flows: bool = True
     cashflow_lookback_days: int = 7
@@ -143,6 +145,8 @@ class YoloConfig:
             execution_max_reprices=_i("YOLO_EXECUTION_MAX_REPRICES", 2),
             execution_reprice_seconds=_f("YOLO_EXECUTION_REPRICE_SECONDS", 5.0),
             execution_deadman_seconds=_i("YOLO_EXECUTION_DEADMAN_SECONDS", 300),
+            execution_cancel_confirm_seconds=_f("YOLO_EXECUTION_CANCEL_CONFIRM_SECONDS", 10.0),
+            execution_cancel_poll_seconds=_f("YOLO_EXECUTION_CANCEL_POLL_SECONDS", 0.5),
             deadman_required=_b("YOLO_DEADMAN_REQUIRED", True),
             auto_sync_cash_flows=_b("YOLO_AUTO_SYNC_CASH_FLOWS", True),
             cashflow_lookback_days=_i("YOLO_CASHFLOW_LOOKBACK_DAYS", 7),
