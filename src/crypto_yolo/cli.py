@@ -330,6 +330,7 @@ def main() -> None:
     parser.add_argument("--wait-for-signal", action="store_true", help="Linux/daemon mode: poll RW until today's signal is current, then run one configured rebalance")
     parser.add_argument("--expected-date", type=date.fromisoformat, default=None)
     parser.add_argument("--buffer-mode", choices=["edge", "target"], default=None)
+    parser.add_argument("--buffer-basis", choices=["absolute_weight", "relative_target"], default=None)
     parser.add_argument("--archive-status", action="store_true", help="Show the most recent archived RW pulls")
     parser.add_argument("--health-status", action="store_true", help="Show the latest persisted health/run summary")
     parser.add_argument("--cashflow-status", action="store_true", help="Show recent detected Hyperliquid cash-flow ledger events")
@@ -345,11 +346,14 @@ def main() -> None:
     config = YoloConfig.from_env()
     if args.buffer_mode:
         config = replace(config, buffer_mode=args.buffer_mode)
+    if args.buffer_basis:
+        config = replace(config, buffer_basis=args.buffer_basis)
 
     try:
         _ = config.normalized_network
         mode = config.normalized_execution_mode
         _ = config.normalized_direction_mode
+        _ = config.normalized_buffer_basis
     except ValueError as exc:
         print(f"CONFIG: BLOCKED — {exc}")
         raise SystemExit(2) from exc
@@ -359,6 +363,8 @@ def main() -> None:
         print(f"network:           {config.normalized_network}")
         print(f"execution mode:    {config.normalized_execution_mode}")
         print(f"direction mode:    {config.normalized_direction_mode}")
+        print(f"buffer basis:      {config.normalized_buffer_basis}")
+        print(f"trade buffer:      {config.trade_buffer:g}")
         print(f"live enabled:      {config.live_trading_enabled}")
         print(f"API key present:   {bool(config.hl_api_wallet_private_key)}")
         print(f"max reprices:      {config.execution_max_reprices}")

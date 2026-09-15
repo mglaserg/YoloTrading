@@ -86,7 +86,7 @@ RW ewvol inverse-vol sizing
         ↓
 asset / gross caps
         ↓
-2% relative trade-to-edge buffer
+2% total absolute-weight trade-to-edge buffer (±1 percentage point)
         ↓
 risk + projected margin gate
         ↓
@@ -403,6 +403,7 @@ YOLO_MIN_NOMINAL_MULTIPLIER=0.25
 YOLO_MAX_NOMINAL_MULTIPLIER=3.00
 
 YOLO_TRADE_BUFFER=0.02
+YOLO_BUFFER_BASIS=absolute_weight
 YOLO_BUFFER_MODE=edge
 YOLO_MAX_ASSET_WEIGHT=0.25
 YOLO_MAX_GROSS_WEIGHT=1.0
@@ -416,6 +417,8 @@ YOLO_EXECUTION_DEADMAN_SECONDS=300
 YOLO_EXECUTION_CANCEL_CONFIRM_SECONDS=10
 YOLO_EXECUTION_CANCEL_POLL_SECONDS=0.5
 ```
+
+`YOLO_BUFFER_BASIS=absolute_weight` is the Robot Wealth/document-canonical interpretation: `YOLO_TRADE_BUFFER` is the **total absolute portfolio-weight width** of the no-trade region. For example, a target weight of 10% with `YOLO_TRADE_BUFFER=0.02` has a 9%-11% no-trade region. In `edge` mode a breach trades only to the nearest edge. Bands are clipped at zero and a zero target always flattens exactly. Set `YOLO_BUFFER_BASIS=relative_target` only to reproduce YOLO's pre-v0.6.4 legacy behavior.
 
 `YOLO_ACCOUNT_COLLATERAL_USD` is retained for fixture/offline risk calculations. Real live runs pass the actual Hyperliquid account equity into the risk gate.
 

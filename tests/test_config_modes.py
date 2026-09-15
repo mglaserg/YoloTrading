@@ -29,6 +29,17 @@ class ConfigModeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _ = YoloConfig(direction_mode="sometimes_short").normalized_direction_mode
 
+    def test_buffer_basis_defaults_to_rw_absolute_weight_and_supports_legacy(self):
+        with patch.dict("os.environ", {}, clear=True):
+            cfg = YoloConfig.from_env()
+        self.assertEqual(cfg.normalized_buffer_basis, "absolute_weight")
+        self.assertEqual(
+            YoloConfig(buffer_basis="RELATIVE_TARGET").normalized_buffer_basis,
+            "relative_target",
+        )
+        with self.assertRaises(ValueError):
+            _ = YoloConfig(buffer_basis="mystery").normalized_buffer_basis
+
 
 if __name__ == "__main__":
     unittest.main()

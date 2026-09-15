@@ -34,6 +34,7 @@ class YoloConfig:
     carry_multiplier: float = 1.0
     trade_buffer: float = 0.02
     buffer_mode: str = "edge"
+    buffer_basis: str = "absolute_weight"
     max_asset_weight: float = 0.25
     max_gross_weight: float = 1.0
     max_margin_utilization: float = 0.60
@@ -93,6 +94,16 @@ class YoloConfig:
         )
 
     @property
+    def normalized_buffer_basis(self) -> str:
+        value = self.buffer_basis.strip().lower()
+        if value in {"absolute_weight", "relative_target"}:
+            return value
+        raise ValueError(
+            f"unknown YOLO_BUFFER_BASIS={self.buffer_basis!r}; "
+            "use absolute_weight or relative_target"
+        )
+
+    @property
     def hyperliquid_api_url(self) -> str:
         override = os.getenv("HL_API_URL", "").strip()
         if override:
@@ -126,6 +137,7 @@ class YoloConfig:
             carry_multiplier=_f("YOLO_CARRY_MULTIPLIER", 1.0),
             trade_buffer=_f("YOLO_TRADE_BUFFER", 0.02),
             buffer_mode=os.getenv("YOLO_BUFFER_MODE", "edge"),
+            buffer_basis=os.getenv("YOLO_BUFFER_BASIS", "absolute_weight"),
             max_asset_weight=_f("YOLO_MAX_ASSET_WEIGHT", 0.25),
             max_gross_weight=_f("YOLO_MAX_GROSS_WEIGHT", 1.0),
             max_margin_utilization=_f("YOLO_MAX_MARGIN_UTILIZATION", 0.60),

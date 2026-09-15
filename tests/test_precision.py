@@ -21,6 +21,22 @@ class PrecisionTests(unittest.TestCase):
         self.assertTrue(rendered.endswith("000"))
         self.assertEqual(plan[0].trade_quantity, round(plan[0].trade_quantity, 5))
 
+    def test_planner_trades_to_absolute_buffer_edge(self):
+        from crypto_yolo.models import Position, TargetRow
+
+        cfg = YoloConfig(nominal_usd=10_000, trade_buffer=0.02, buffer_mode="edge")
+        target = TargetRow("BTC", 100.0, 0, 0, 0, 1.0, 0.10, 0.10, 0.10, 1000.0, 10.0)
+        plan = plan_trades(
+            [target],
+            {"BTC": Position("BTC", 5.0, 100.0)},
+            cfg,
+            mark_prices={"BTC": 100.0},
+            size_decimals={"BTC": 2},
+        )
+        self.assertAlmostEqual(plan[0].post_trade_weight, 0.09)
+        self.assertAlmostEqual(plan[0].trade_quantity, 4.0)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .buffer import buffered_destination, relative_buffer_bounds
+from .buffer import buffer_bounds, buffered_destination
 from .config import YoloConfig
 from .models import Position, TargetRow, TradePlanRow
 
@@ -41,6 +41,7 @@ def plan_trades(
             target_weight=t.final_weight,
             buffer=config.trade_buffer,
             mode=config.buffer_mode,
+            basis=config.normalized_buffer_basis,
         )
         destination_value = destination_weight * config.nominal_usd
         desired_destination_qty = 0.0 if price == 0 else destination_value / price
@@ -50,7 +51,9 @@ def plan_trades(
         post_qty = p.quantity + trade_qty
         post_weight = post_qty * price / config.nominal_usd if config.nominal_usd else 0.0
         trade_value = trade_qty * price
-        lo, hi = relative_buffer_bounds(t.final_weight, config.trade_buffer)
+        lo, hi = buffer_bounds(
+            t.final_weight, config.trade_buffer, config.normalized_buffer_basis
+        )
 
         # Exchange rounding can leave the destination microscopically beyond an edge.
         one_lot_weight = 0.0
